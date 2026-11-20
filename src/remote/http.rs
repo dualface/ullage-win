@@ -51,9 +51,11 @@ pub enum HttpError {
 #[derive(Clone, Copy, Debug)]
 pub struct Deadline {
     end: Instant,
-    /// For tests: the deadline passes only after the network is done.
+    /// For tests: the deadline passes at the n-th judgement, and not before.
+    /// The network time is the real one, `limit`; what is made late is what
+    /// comes after it. The count is shared by the copies of the deadline.
     #[cfg(test)]
-    late: bool,
+    late_at_judgement: Option<(&'static std::sync::atomic::AtomicUsize, usize)>,
 }
 
 impl Deadline {
@@ -61,18 +63,25 @@ impl Deadline {
         Self {
             end: Instant::now() + limit,
             #[cfg(test)]
-            late: false,
+            late_at_judgement: None,
         }
     }
 
-    /// A deadline whose network time is `limit`, and which is over by the
-    /// time the result is judged: it stands for an answer that came in time
-    /// and was processed too late.
+    /// A deadline that is over from the first judgement on: it stands for an
+    /// answer that came in time and was processed too late.
     #[cfg(test)]
     pub fn late_after(limit: Duration) -> Self {
+        Self::late_at(limit, 1)
+    }
+
+    /// A deadline that is over from the `n`-th judgement on. Earlier ones
+    /// find it in time, so that a test can make only the last one late.
+    #[cfg(test)]
+    pub fn late_at(limit: Duration, n: usize) -> Self {
+        let counter = Box::leak(Box::new(std::sync::atomic::AtomicUsize::new(0)));
         Self {
             end: Instant::now() + limit,
-            late: true,
+            late_at_judgement: Some((counter, n)),
         }
     }
 
@@ -88,8 +97,9 @@ impl Deadline {
 
     fn passed(&self) -> bool {
         #[cfg(test)]
-        if self.late {
-            return true;
+        if let Some((count, n)) = self.late_at_judgement {
+            let this = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            return this >= n;
         }
         Instant::now() >= self.end
     }

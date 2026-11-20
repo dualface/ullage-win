@@ -19,7 +19,9 @@ use super::address::RemoteAddress;
 use super::http::{self, Deadline, HttpError, Request};
 use super::store::Token;
 
-/// The longest one fetch may take, from connecting to the last byte.
+/// The longest one fetch may take, from the entry of `fetch_remote` to the
+/// judgement of its result: the check of the credential, the connection, the
+/// request, the answer, and the checks of `fetch_usage` all spend it.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct HttpClient {

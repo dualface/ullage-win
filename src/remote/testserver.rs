@@ -35,6 +35,11 @@ pub struct Server {
 }
 
 impl Server {
+    /// Asks the listener to stop, without waiting for it.
+    pub fn request_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
     /// Waits for the replies to be used up, and returns what was seen.
     pub fn finish(self) -> Vec<Seen> {
         self.handle.join().expect("the test server ended")
@@ -74,6 +79,20 @@ pub fn reply(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
 
 /// Listens on a free loopback port and answers one connection per reply.
 pub fn serve(replies: Vec<Reply>) -> Server {
+    serve_with(replies, None)
+}
+
+/// What a test uses to fix the order of events in the listener thread: it
+/// says when the thread has found no connection waiting, and then parks until
+/// it is told to go on.
+pub struct Park {
+    pub reached: std::sync::mpsc::Sender<()>,
+    pub go_on: std::sync::mpsc::Receiver<()>,
+}
+
+/// [`serve`], with a listener thread that parks after the first time it finds
+/// no connection waiting.
+pub fn serve_with(replies: Vec<Reply>, park: Option<Park>) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a free port");
     listener
         .set_nonblocking(true)
@@ -83,6 +102,7 @@ pub fn serve(replies: Vec<Reply>) -> Server {
     let accepted = Arc::new(AtomicUsize::new(0));
     let (stopped, counted) = (stop.clone(), accepted.clone());
     let handle = thread::spawn(move || {
+        let mut park = park;
         let mut seen = Vec::new();
         let mut replies = replies.into_iter();
         let mut next = replies.next();
@@ -90,6 +110,12 @@ pub fn serve(replies: Vec<Reply>) -> Server {
             let mut stream = match listener.accept() {
                 Ok((stream, _)) => stream,
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    if let Some(park) = park.take() {
+                        // The state a test wants: no connection was waiting a
+                        // moment ago. What happens now is up to the test.
+                        let _ = park.reached.send(());
+                        let _ = park.go_on.recv();
+                    }
                     if !stopped.load(Ordering::SeqCst) {
                         thread::sleep(Duration::from_millis(5));
                         continue;
@@ -190,18 +216,23 @@ mod tests {
 
     #[test]
     fn a_connection_that_is_queued_when_the_server_is_stopped_is_still_counted() {
-        // The client is connected (the system has queued it) before the stop
-        // is asked for, with no wait in between: the stop must not make the
-        // server end without counting it.
-        for _ in 0..20 {
-            let server = serve(vec![Reply::Raw(ok(b"{}"))]);
-            // Connected and closed at once, so that the server does not wait
-            // for a request that never comes.
-            drop(TcpStream::connect(server.address.socket_addr()).unwrap());
-            let (seen, accepted) = server.finish_after(Duration::ZERO);
-            assert!(seen.is_empty());
-            assert_eq!(accepted, 1);
-        }
+        // The order is fixed, not left to the scheduler: the listener finds
+        // no connection, and parks. A client connects (the system queues it)
+        // and the stop is asked for. Only then does the listener go on, with
+        // a stop that came after its last look and a connection it never
+        // saw. A listener that ends on the stop alone counts nothing here.
+        let (reached, reached_rx) = std::sync::mpsc::channel();
+        let (go_on_tx, go_on) = std::sync::mpsc::channel();
+        let server = serve_with(vec![Reply::Raw(ok(b"{}"))], Some(Park { reached, go_on }));
+        reached_rx.recv().unwrap();
+        // Connected and closed, so that the server does not wait for a
+        // request that never comes.
+        drop(TcpStream::connect(server.address.socket_addr()).unwrap());
+        server.request_stop();
+        go_on_tx.send(()).unwrap();
+        let (seen, accepted) = server.finish_after(Duration::ZERO);
+        assert!(seen.is_empty());
+        assert_eq!(accepted, 1);
     }
 
     #[test]

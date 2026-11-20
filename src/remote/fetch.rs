@@ -28,18 +28,24 @@ fn fetch_remote_by(
     address: &RemoteAddress,
     deadline: Deadline,
 ) -> Result<UsageFetch, FailureKind> {
-    let Some(credential) = credential_for(store, address) else {
-        return Err(FailureKind::NotPaired);
-    };
-    let client = HttpClient::new(*address, credential.token, deadline);
-    let result = fetch_usage(&client).map_err(|error| {
-        // `ClientError` has no word for a refused token: the client noted it.
-        if error == FetchError::InvalidResponse && client.was_rejected() {
-            FailureKind::TokenRejected
-        } else {
-            FailureKind::Fetch(error)
+    let result = match credential_for(store, address) {
+        // The answer to "not paired" is judged too: the credential store may
+        // have been slow, and a late answer is a timeout, which keeps what the
+        // window shows.
+        None => Err(FailureKind::NotPaired),
+        Some(credential) => {
+            let client = HttpClient::new(*address, credential.token, deadline);
+            fetch_usage(&client).map_err(|error| {
+                // `ClientError` has no word for a refused token: the client
+                // noted it.
+                if error == FetchError::InvalidResponse && client.was_rejected() {
+                    FailureKind::TokenRejected
+                } else {
+                    FailureKind::Fetch(error)
+                }
+            })
         }
-    });
+    };
     deadline.judge(result, FailureKind::Fetch(FetchError::DaemonUnavailable))
 }
 
@@ -146,19 +152,54 @@ mod tests {
 
     #[test]
     fn a_fetch_that_is_ready_only_after_the_deadline_is_a_timeout_whatever_it_is() {
-        let late = || Deadline::late_after(Duration::from_secs(5));
+        // The client's own judgement (the first) finds the deadline in time;
+        // only the last one, that of `fetch_remote_by`, is late. Without that
+        // one the fetch would be returned as it is, so this fails without it.
+        let late_at_the_end = || Deadline::late_at(Duration::from_secs(5), 2);
         let gone = FailureKind::Fetch(FetchError::DaemonUnavailable);
-        for reply in [
-            ok(&body(ControlResult::Snapshots(Vec::new()))),
-            reply("401 Unauthorized", &[], b"{}"),
-            ok(b"not json"),
+        for (reply, would_be) in [
+            (ok(&body(ControlResult::Snapshots(Vec::new()))), "a fetch"),
+            (reply("401 Unauthorized", &[], b"{}"), "a rejected token"),
+            (ok(b"not json"), "an invalid answer"),
         ] {
             let server = serve(vec![Reply::Raw(reply)]);
+            let result = fetch_remote_by(
+                &store_for(server.address),
+                &server.address,
+                late_at_the_end(),
+            );
+            assert_eq!(result.unwrap_err(), gone, "{would_be}");
+        }
+    }
+
+    #[test]
+    fn a_credential_that_is_missing_is_not_paired_in_time_and_a_timeout_when_late() {
+        let server = serve(vec![Reply::Raw(ok(&body(ControlResult::Snapshots(
+            Vec::new(),
+        ))))]);
+        let other = RemoteAddress::parse("10.0.0.1:7878").unwrap();
+        let on_time = || Deadline::after(Duration::from_secs(5));
+        let late = || Deadline::late_after(Duration::from_secs(5));
+        for store in [MemoryStore::default(), store_for(other)] {
             assert_eq!(
-                fetch_remote_by(&store_for(server.address), &server.address, late()).unwrap_err(),
-                gone
+                fetch_remote_by(&store, &server.address, on_time()).unwrap_err(),
+                FailureKind::NotPaired
+            );
+            assert_eq!(
+                fetch_remote_by(&store, &server.address, late()).unwrap_err(),
+                FailureKind::Fetch(FetchError::DaemonUnavailable)
             );
         }
+        let unreadable = store_for(server.address);
+        unreadable.fail_load.set(true);
+        assert_eq!(
+            fetch_remote_by(&unreadable, &server.address, late()).unwrap_err(),
+            FailureKind::Fetch(FetchError::DaemonUnavailable)
+        );
+        // Neither branch connected to the daemon.
+        let (seen, accepted) = server.finish_after(Duration::from_millis(100));
+        assert!(seen.is_empty());
+        assert_eq!(accepted, 0);
     }
 
     #[test]
