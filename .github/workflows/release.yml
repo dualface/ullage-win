@@ -12,8 +12,15 @@ jobs:
       - name: Get the version from the tag
         id: version
         shell: pwsh
+        # The tag name reaches the script as data through the environment, never
+        # as expanded source: a tag name may hold PowerShell syntax characters.
+        env:
+          TAG_NAME: ${{ github.ref_name }}
         run: |
-          $version = "${{ github.ref_name }}" -replace '^v',''
+          $version = $env:TAG_NAME -creplace '^v',''
+          if ($version -cnotmatch '^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$') {
+            throw "Tag '$env:TAG_NAME' is not v<major>.<minor>.<patch>"
+          }
           $manifest = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
           if (-not $manifest) { throw "No package version found in Cargo.toml" }
           $cargo = $manifest.Matches[0].Groups[1].Value
@@ -32,12 +39,14 @@ jobs:
           if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
       - name: Package
         shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found: $iscc" }
           New-Item -ItemType Directory -Force dist | Out-Null
           & $iscc `
-            "/DAppVersion=${{ steps.version.outputs.version }}" `
+            "/DAppVersion=$env:APP_VERSION" `
             "/DSourceExe=$pwd\target\release\ullage-win.exe" `
             "/DLicenseFile=$pwd\LICENSE" `
             "/DReadmeFile=$pwd\README.md" `
