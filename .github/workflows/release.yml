@@ -1,0 +1,56 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get the version from the tag
+        id: version
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v',''
+          $manifest = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $manifest) { throw "No package version found in Cargo.toml" }
+          $cargo = $manifest.Matches[0].Groups[1].Value
+          if ($version -ne $cargo) {
+            throw "Tag version '$version' does not match Cargo.toml version '$cargo'"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+      - name: Package
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found: $iscc" }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          & $iscc `
+            "/DAppVersion=${{ steps.version.outputs.version }}" `
+            "/DSourceExe=$pwd\target\release\ullage-win.exe" `
+            "/DLicenseFile=$pwd\LICENSE" `
+            "/DReadmeFile=$pwd\README.md" `
+            "/DOutputDir=$pwd\dist" `
+            "$pwd\packaging\windows\ullage-win.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          Compress-Archive -Path target\release\ullage-win.exe -DestinationPath dist\ullage-win-x86_64.zip
+          Set-Location dist
+          Get-ChildItem -File | ForEach-Object {
+            "$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower())  $($_.Name)"
+          } | Set-Content -Encoding ascii checksums.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ullage-win-${{ steps.version.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
