@@ -11,7 +11,10 @@ use crate::state::FailureKind;
 
 /// Fetches the usage from `address`, with the token saved for that address.
 /// A token saved for another address, or none, or one that cannot be read,
-/// is "not paired": nothing is sent.
+/// is "not paired" when the check is done in time, and nothing is sent. When
+/// the check is done only after the deadline, the result is the timeout
+/// instead, again with nothing sent, so that a slow credential store does not
+/// clear what the window shows.
 pub fn fetch_remote(
     store: &dyn TokenStore,
     address: &RemoteAddress,
@@ -173,18 +176,15 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_that_is_missing_is_not_paired_in_time_and_a_timeout_when_late() {
+    fn a_credential_that_is_missing_or_unreadable_is_a_timeout_when_late() {
+        // In time, these are "not paired": the test above has that. Here the
+        // check is done only after the deadline.
         let server = serve(vec![Reply::Raw(ok(&body(ControlResult::Snapshots(
             Vec::new(),
         ))))]);
         let other = RemoteAddress::parse("10.0.0.1:7878").unwrap();
-        let on_time = || Deadline::after(Duration::from_secs(5));
         let late = || Deadline::late_after(Duration::from_secs(5));
         for store in [MemoryStore::default(), store_for(other)] {
-            assert_eq!(
-                fetch_remote_by(&store, &server.address, on_time()).unwrap_err(),
-                FailureKind::NotPaired
-            );
             assert_eq!(
                 fetch_remote_by(&store, &server.address, late()).unwrap_err(),
                 FailureKind::Fetch(FetchError::DaemonUnavailable)
