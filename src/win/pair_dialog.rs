@@ -291,3 +291,117 @@ fn clear(hwnd: HWND, shared: &Shared) {
     set_text(hwnd, ID_ADDRESS, "");
     shared.formatting.set(false);
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
+    use windows::core::PCWSTR;
+
+    use super::*;
+    use crate::pair_form::TITLE;
+
+    /// The dialog is one per process, so the tests take turns.
+    static TURN: Mutex<()> = Mutex::new(());
+
+    /// The dialog is driven from another thread, the way a user would from
+    /// the keyboard: the dialog runs on the thread of the test.
+    fn find_dialog() -> HWND {
+        let title = wide(TITLE);
+        let started = Instant::now();
+        loop {
+            let found = unsafe { FindWindowW(PCWSTR::null(), pcwstr(&title)) };
+            if let Ok(hwnd) = found {
+                return hwnd;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10), "no dialog");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn enabled(hwnd: HWND, id: u16) -> bool {
+        let item = unsafe { GetDlgItem(Some(hwnd), id.into()) }.unwrap();
+        unsafe { IsWindowEnabled(item) }.as_bool()
+    }
+
+    fn click(hwnd: HWND, id: u16) {
+        unsafe {
+            PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(usize::from(id)), LPARAM(0)).unwrap();
+        }
+    }
+
+    // The values are in `Send` form: a raw handle crosses threads, an `HWND`
+    // does not.
+    fn drive(script: impl FnOnce(HWND) + Send + 'static) -> thread::JoinHandle<()> {
+        thread::spawn(move || script(find_dialog()))
+    }
+
+    #[test]
+    fn a_dialog_formats_the_code_and_takes_only_a_whole_one() {
+        let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let driver = drive(|dialog| {
+            // The address was filled in, so the code is what is missing.
+            assert_eq!(text_of(dialog, ID_ADDRESS), "center:7878");
+            assert_eq!(text_of(dialog, ID_ADDRESS_NOTE), "");
+            assert!(!enabled(dialog, ID_OK));
+            // Typed and pasted codes are made into the form of a code.
+            set_text(dialog, ID_CODE, "abc");
+            assert_eq!(text_of(dialog, ID_CODE), "ABC");
+            assert!(!enabled(dialog, ID_OK));
+            set_text(dialog, ID_CODE, "abcd");
+            assert_eq!(text_of(dialog, ID_CODE), "ABC-D");
+            set_text(dialog, ID_CODE, "a0b1c2");
+            assert_eq!(text_of(dialog, ID_CODE), "ABC-2");
+            set_text(dialog, ID_CODE, " abc-def\r\n");
+            assert_eq!(text_of(dialog, ID_CODE), "ABC-DEF");
+            assert!(enabled(dialog, ID_OK));
+            // An address that is not taken says why, and holds OK back.
+            set_text(dialog, ID_ADDRESS, "8.8.8.8:80");
+            assert!(text_of(dialog, ID_ADDRESS_NOTE).contains("not a loopback"));
+            assert!(!enabled(dialog, ID_OK));
+            set_text(dialog, ID_ADDRESS, "");
+            assert_eq!(text_of(dialog, ID_ADDRESS_NOTE), "");
+            assert!(!enabled(dialog, ID_OK));
+            set_text(dialog, ID_ADDRESS, "Center:7878");
+            assert!(enabled(dialog, ID_OK));
+            // A second dialog is not opened while this one is.
+            assert!(matches!(run(HWND::default(), None), Err(Refused::Busy)));
+            click(dialog, ID_OK);
+        });
+        let entry = run(HWND::default(), Some("center:7878")).unwrap().unwrap();
+        driver.join().unwrap();
+        assert_eq!(entry.address, "Center:7878");
+        assert_eq!(entry.code, "ABC-DEF");
+    }
+
+    #[test]
+    fn ok_does_nothing_until_the_input_is_good_and_cancel_sends_nothing() {
+        let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let driver = drive(|dialog| {
+            // Without a prefill the address is what is missing.
+            assert_eq!(text_of(dialog, ID_ADDRESS), "");
+            set_text(dialog, ID_CODE, "abcdef");
+            assert!(!enabled(dialog, ID_OK));
+            // Enter reaches OK even when the button is held back: nothing
+            // happens, and the dialog stays.
+            click(dialog, ID_OK);
+            thread::sleep(Duration::from_millis(300));
+            assert_eq!(text_of(dialog, ID_CODE), "ABC-DEF");
+            // Close is Cancel.
+            unsafe {
+                PostMessageW(Some(dialog), WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap();
+            }
+        });
+        let entry = run(HWND::default(), None).unwrap();
+        driver.join().unwrap();
+        assert!(entry.is_none());
+        // The dialog is closed, so another may open.
+        let driver = drive(|dialog| click(dialog, ID_CANCEL));
+        assert!(run(HWND::default(), None).unwrap().is_none());
+        driver.join().unwrap();
+    }
+}
