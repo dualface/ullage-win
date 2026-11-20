@@ -10,7 +10,8 @@ drawn as a modern Windows window instead of a terminal screen.
   line per account.
 - Follows the system light and dark setting.
 - Refreshes every 2 minutes. It only reads: it signs in to nothing and changes
-  nothing in the daemon.
+  no account. The one thing it does to a remote daemon is that pairing
+  registers this device there (see "A daemon on another host").
 - When the daemon cannot be reached, the window says why and shows the command
   that fixes it.
 
@@ -90,7 +91,8 @@ window of the first copy.
 | Mouse wheel | Scroll, when the cards are taller than the screen |
 
 The menu has: show or hide, compact strip, always on top, click-through, layout,
-text size, opacity, refresh now, start at sign-in, and quit. While
+text size, opacity, connection (which daemon to ask, and how to pair with a
+remote one), refresh now, start at sign-in, and quit. While
 click-through is on, mouse clicks pass through the window, so turn it off from
 the tray menu.
 
@@ -107,8 +109,9 @@ it is the value `Ullage Window` under
 ## A daemon on another host
 
 The window can show the usage that the daemon of another host knows, for
-example a Linux machine, through the daemon's HTTP API. Choose
-`Connection` > `Remote daemon` in the tray menu.
+example a Linux machine, through the daemon's HTTP API. Pair with it once from
+the `Connection` menu in the tray menu: `Remote daemon` can be chosen only
+after that.
 
 On the host that runs the daemon:
 
@@ -134,9 +137,10 @@ Some points to know:
 - Only an IPv4 address is accepted, and only a loopback, Tailscale (100.64.0.0/10)
   or private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) one. A host name or a
   public address is refused.
-- The HTTP API has no TLS. On Tailscale the traffic is encrypted by WireGuard.
-  On any other address the token and the usage cross the network as plain text,
-  and the menu entry says `(plaintext)`.
+- The HTTP API has no TLS. On Tailscale the traffic is encrypted by WireGuard,
+  and a loopback address never leaves the host. On any other address, that is a
+  private network address, the token and the usage cross the network as plain
+  text, and the menu entry and the question before pairing say `(plaintext)`.
 - The device token is kept in the Windows Credential Manager, under the name
   `Ullage Window remote token`, together with the address it belongs to. It is
   never written to `window.json` or to any log.
