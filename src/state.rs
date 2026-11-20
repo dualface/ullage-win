@@ -122,7 +122,8 @@ pub enum State {
     Ready(Vec<SnapshotPayload>),
     /// The last fetch failed; the data of an earlier one is kept.
     Stalled(Vec<SnapshotPayload>),
-    /// No fetch ever worked, and the last one failed.
+    /// There is nothing to show, and why: no fetch worked yet, or the remote
+    /// daemon asks to be paired again, which old data does not answer.
     Unavailable(Failure),
 }
 

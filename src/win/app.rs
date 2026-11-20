@@ -43,8 +43,8 @@ use crate::menu::{Command, MenuState};
 use crate::placement::{Edges, keep_inside, restore_position, to_px, window_size_px};
 use crate::prefs::{Connection, Prefs, save};
 use crate::remote::address::RemoteAddress;
-use crate::remote::pairing::{self, ApplyError, PairCode, parse_clipboard};
-use crate::remote::store::{Credential, TokenStore};
+use crate::remote::pairing::{self, ApplyError, ForgetError, PairCode, parse_clipboard};
+use crate::remote::store::{Credential, credential_for};
 use crate::scene::{self, Body, Input, Scene, Spot, Target, WORK_AREA_MARGIN};
 use crate::state::{Schedule, State, countdown};
 use crate::theme::Mode;
@@ -645,10 +645,9 @@ impl App {
     /// Whether a token is saved for the address of the settings. It is the
     /// same test a fetch makes before it sends anything.
     fn remote_paired(&self) -> bool {
-        match (self.prefs.remote_address, CredStore.load()) {
-            (Some(address), Ok(Some(credential))) => credential.address == address,
-            _ => false,
-        }
+        self.prefs
+            .remote_address
+            .is_some_and(|address| credential_for(&CredStore, &address).is_some())
     }
 
     /// Saves `next` as the settings. The caller makes it the settings in
@@ -687,6 +686,13 @@ impl App {
     /// trusted: a bad text says so and sends nothing, and a good one is shown
     /// to the user, with the address, before the code goes anywhere.
     fn pair_from_clipboard(&mut self) -> Option<Dialog> {
+        // A pairing that could not be kept would still use up the code and
+        // register this device at the daemon: it is not started.
+        if self.prefs_path.is_none() {
+            return Some(Dialog::Notice(
+                "There is no place to save the settings, so no pairing was started.".into(),
+            ));
+        }
         let text = clipboard::get_text(self.hwnd).unwrap_or_default();
         match parse_clipboard(&text) {
             Err(error) => Some(Dialog::Notice(error.to_string())),
@@ -732,13 +738,7 @@ impl App {
                     let mut next = self.prefs.clone();
                     next.connection = Connection::Remote;
                     next.remote_address = Some(address);
-                    let path = self.prefs_path.clone();
-                    let kept = pairing::apply(&CredStore, &credential, || match &path {
-                        Some(path) => save(path, &next),
-                        // Without a place for the settings, the pairing would
-                        // be gone at the next start: it is not made.
-                        None => Err(io::Error::other("there is no settings file")),
-                    });
+                    let kept = pairing::apply(&CredStore, &credential, || self.persist(&next));
                     match kept {
                         Ok(()) => {
                             self.prefs = next;
@@ -767,31 +767,30 @@ impl App {
 
     /// Deletes the token and the address, and goes back to the local daemon.
     fn forget_remote(&mut self) -> Option<Dialog> {
-        let before = CredStore.load().ok().flatten();
-        if CredStore.delete().is_err() {
-            return Some(Dialog::Notice(
-                "The device token could not be removed from the Windows Credential Manager. \
-                 Nothing was changed."
-                    .into(),
-            ));
-        }
         let mut next = self.prefs.clone();
         next.connection = Connection::Local;
         next.remote_address = None;
-        if self.persist(&next).is_err() {
-            // The settings still name the daemon: the token goes back.
-            let restored = before.is_none_or(|credential| CredStore.save(&credential).is_ok());
-            return Some(Dialog::Notice(if restored {
-                "The settings could not be saved. Nothing was changed.".into()
-            } else {
+        let notice = match pairing::forget(&CredStore, || self.persist(&next)) {
+            Ok(()) => {
+                self.prefs = next;
+                self.connection_changed();
+                return None;
+            }
+            Err(ForgetError::Read) => {
+                "The device token could not be read from the Windows Credential Manager. \
+                 Nothing was changed."
+            }
+            Err(ForgetError::Delete) => {
+                "The device token could not be removed from the Windows Credential Manager. \
+                 Nothing was changed."
+            }
+            Err(ForgetError::Settings) => "The settings could not be saved. Nothing was changed.",
+            Err(ForgetError::Rollback) => {
                 "The settings could not be saved, and the device token could not be put back. \
                  Pair again with Pair from clipboard."
-                    .into()
-            }));
-        }
-        self.prefs = next;
-        self.connection_changed();
-        None
+            }
+        };
+        Some(Dialog::Notice(notice.into()))
     }
 
     fn layout_changed(&mut self) {
