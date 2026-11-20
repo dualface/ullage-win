@@ -7,6 +7,7 @@ pub mod client;
 pub mod fetch;
 pub mod http;
 pub mod pairing;
+pub mod resolve;
 pub mod store;
 #[cfg(test)]
 mod testserver;

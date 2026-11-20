@@ -101,6 +101,7 @@ pub fn serve_with(replies: Vec<Reply>, park: Option<Park>) -> Server {
     let stop = Arc::new(AtomicBool::new(false));
     let accepted = Arc::new(AtomicUsize::new(0));
     let (stopped, counted) = (stop.clone(), accepted.clone());
+    let listening_on = address.clone();
     let handle = thread::spawn(move || {
         let mut park = park;
         let mut seen = Vec::new();
@@ -141,7 +142,7 @@ pub fn serve_with(replies: Vec<Reply>, park: Option<Park>) -> Server {
             seen.push(Seen {
                 head,
                 body,
-                address,
+                address: listening_on.clone(),
             });
             match next.take() {
                 Some(Reply::Raw(bytes)) => {
@@ -205,8 +206,8 @@ mod tests {
         // The count must include a connection that sends nothing and one that
         // sends only part of a request headers: neither makes a `Seen`.
         let server = serve(vec![Reply::Raw(ok(b"{}"))]);
-        drop(TcpStream::connect(server.address.socket_addr()).unwrap());
-        let mut partial = TcpStream::connect(server.address.socket_addr()).unwrap();
+        drop(TcpStream::connect(server.address.literal().unwrap()).unwrap());
+        let mut partial = TcpStream::connect(server.address.literal().unwrap()).unwrap();
         partial.write_all(b"GET /x HTT").unwrap();
         drop(partial);
         let (seen, accepted) = server.finish_after(Duration::from_millis(200));
@@ -227,7 +228,7 @@ mod tests {
         reached_rx.recv().unwrap();
         // Connected and closed, so that the server does not wait for a
         // request that never comes.
-        drop(TcpStream::connect(server.address.socket_addr()).unwrap());
+        drop(TcpStream::connect(server.address.literal().unwrap()).unwrap());
         server.request_stop();
         go_on_tx.send(()).unwrap();
         let (seen, accepted) = server.finish_after(Duration::ZERO);

@@ -1,5 +1,6 @@
 //! What the window knows about the daemon and when it asks again.
 
+use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use ullage_cli::usage_view::{FetchError, UsageFetch};
@@ -73,6 +74,9 @@ pub enum FailureKind {
     NotPaired,
     /// The remote daemon answered `401`: it does not know the token.
     TokenRejected,
+    /// The name of the remote daemon resolved to this address, which is not
+    /// loopback, Tailscale or private. Nothing was sent.
+    AddressRefused(Ipv4Addr),
 }
 
 /// The words for a failed fetch. `remote` is the address of the remote
@@ -93,11 +97,28 @@ pub fn failure_for_kind(kind: &FailureKind, remote: Option<&RemoteAddress>) -> F
                 .into(),
             command: "ullage device pair",
         },
+        (FailureKind::AddressRefused(ip), remote) => Failure {
+            title: match remote {
+                Some(address) => format!("Can't connect to {address}"),
+                None => "Can't connect to the remote daemon".into(),
+            },
+            body: format!(
+                "The name resolves to {ip}, which is not a loopback, Tailscale or private \
+                 address, so nothing was sent. Check the DNS entry of the host."
+            ),
+            command: "ullage device list",
+        },
         (FailureKind::Fetch(FetchError::DaemonUnavailable), Some(address)) => Failure {
             title: format!("Can't reach {address}"),
-            body: "Check that the host is on, that its ullage config has http.enabled set, and \
-                   that it listens on that address. Run the command on that host."
-                .into(),
+            body: format!(
+                "Check that the host is on, that its ullage config has http.enabled set, and \
+                 that it listens on that address.{} Run the command on that host.",
+                if address.name().is_some() {
+                    " The name may not resolve."
+                } else {
+                    ""
+                }
+            ),
             command: "ullage daemon status",
         },
         // The commands of the local words are for the host that runs the
@@ -137,9 +158,11 @@ impl State {
             Ok(fetch) => State::Ready(fetch.snapshots),
             // What the user has to do about these is not shown by old data:
             // they are told even when there is some.
-            Err(kind @ (FailureKind::NotPaired | FailureKind::TokenRejected)) => {
-                State::Unavailable(failure_for_kind(&kind, remote))
-            }
+            Err(
+                kind @ (FailureKind::NotPaired
+                | FailureKind::TokenRejected
+                | FailureKind::AddressRefused(_)),
+            ) => State::Unavailable(failure_for_kind(&kind, remote)),
             Err(kind) => match self {
                 State::Ready(snapshots) | State::Stalled(snapshots) => State::Stalled(snapshots),
                 State::Loading | State::Unavailable(_) => {
@@ -397,6 +420,34 @@ mod tests {
     }
 
     #[test]
+    fn a_name_that_resolves_to_a_public_address_is_told_with_the_address() {
+        let address = RemoteAddress::parse("center:7878").unwrap();
+        let ip: Ipv4Addr = "8.8.8.8".parse().unwrap();
+        let failure = failure_for_kind(&FailureKind::AddressRefused(ip), Some(&address));
+        assert_eq!(failure.title, "Can't connect to center:7878");
+        assert!(failure.body.contains("resolves to 8.8.8.8"));
+        assert!(failure.body.contains("nothing was sent"));
+        assert_eq!(failure.command, "ullage device list");
+    }
+
+    #[test]
+    fn only_a_name_may_not_resolve() {
+        let by_name = RemoteAddress::parse("center:7878").unwrap();
+        let by_ip = remote();
+        let kind = FailureKind::Fetch(FetchError::DaemonUnavailable);
+        assert!(
+            failure_for_kind(&kind, Some(&by_name))
+                .body
+                .contains("The name may not resolve.")
+        );
+        assert!(
+            !failure_for_kind(&kind, Some(&by_ip))
+                .body
+                .contains("may not resolve")
+        );
+    }
+
+    #[test]
     fn the_other_failures_of_a_remote_daemon_keep_the_words_of_a_local_one() {
         let address = remote();
         for error in [
@@ -426,7 +477,8 @@ mod tests {
     #[test]
     fn a_remote_that_asks_for_pairing_is_told_even_when_there_is_data() {
         let address = remote();
-        for kind in [FailureKind::NotPaired, FailureKind::TokenRejected] {
+        let refused = FailureKind::AddressRefused("8.8.8.8".parse().unwrap());
+        for kind in [FailureKind::NotPaired, FailureKind::TokenRejected, refused] {
             let ready = State::Ready(fetch(2).snapshots);
             assert_eq!(
                 ready.after_fetch(Err(kind.clone()), Some(&address)),

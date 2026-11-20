@@ -6,12 +6,14 @@
 //! together, so that they never get out of step.
 
 use std::fmt;
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use super::address::{AddressError, RemoteAddress};
 use super::http::{self, Deadline, HttpError, Request};
+use super::resolve::{ResolveError, Resolver, SystemResolver, resolve};
 use super::store::{Credential, StoreError, Token, TokenStore};
 
 /// The longest a pairing request may take. A fetch has its own limit.
@@ -136,6 +138,9 @@ pub enum PairError {
     /// The daemon did not take the code: wrong, used, expired, or too many
     /// wrong ones before it.
     Refused,
+    /// The name of the daemon resolved to this address, which may not
+    /// receive a pairing code. Nothing was sent.
+    AddressRefused(Ipv4Addr),
     /// One attempt a second per source address.
     TooFast,
     /// Anything else: an answer this app cannot read.
@@ -144,7 +149,15 @@ pub enum PairError {
 
 impl fmt::Display for PairError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let PairError::AddressRefused(ip) = self {
+            return write!(
+                f,
+                "The name resolves to {ip}, which is not a loopback, Tailscale or private \
+                 address, so nothing was sent."
+            );
+        }
         f.write_str(match self {
+            PairError::AddressRefused(_) => unreachable!("handled above"),
             PairError::Unreachable => "The daemon could not be reached.",
             PairError::Refused => {
                 "The daemon did not accept the pairing code. Run `ullage device pair` again for a new one."
@@ -169,16 +182,26 @@ pub fn pair(
     pair_by(address, code, device_name, Deadline::after(PAIR_TIMEOUT))
 }
 
-/// [`pair`] with the deadline of the whole pairing: it covers the request,
-/// the answer and the reading of the token, and it is the last word. A token
-/// that is ready only after it is not given.
 fn pair_by(
     address: &RemoteAddress,
     code: &PairCode,
     device_name: &str,
     deadline: Deadline,
 ) -> Result<Token, PairError> {
-    let result = ask(address, code, device_name, &deadline);
+    pair_in(address, code, device_name, deadline, &SystemResolver)
+}
+
+/// [`pair`] with the deadline of the whole pairing: it covers the lookup of a
+/// host name, the request, the answer and the reading of the token, and it is
+/// the last word. A token that is ready only after it is not given.
+fn pair_in(
+    address: &RemoteAddress,
+    code: &PairCode,
+    device_name: &str,
+    deadline: Deadline,
+    resolver: &dyn Resolver,
+) -> Result<Token, PairError> {
+    let result = ask(address, code, device_name, &deadline, resolver);
     deadline.judge(result, PairError::Unreachable)
 }
 
@@ -187,10 +210,15 @@ fn ask(
     code: &PairCode,
     device_name: &str,
     deadline: &Deadline,
+    resolver: &dyn Resolver,
 ) -> Result<Token, PairError> {
+    let addresses = resolve(address, resolver, deadline).map_err(|error| match error {
+        ResolveError::NotAllowed(ip) => PairError::AddressRefused(ip),
+        _ => PairError::Unreachable,
+    })?;
     let body = serde_json::json!({ "pair_code": code.0, "device_name": device_name }).to_string();
     let answer = http::send(
-        address,
+        &addresses,
         &Request {
             method: "POST",
             path: "/v1/pair",
@@ -317,6 +345,7 @@ pub fn forget(
 mod tests {
     use std::io;
 
+    use super::super::resolve::fake::Fake;
     use super::super::store::memory::MemoryStore;
     use super::super::testserver::{Reply, reply, serve};
     use super::*;
@@ -361,9 +390,10 @@ mod tests {
             Err(ClipboardError::Address(AddressError::NotAllowed))
         );
         assert_eq!(
-            parse_clipboard("center:7878 ABC-DEF"),
-            Err(ClipboardError::Address(AddressError::NotIpv4Literal))
+            parse_clipboard("under_score:7878 ABC-DEF"),
+            Err(ClipboardError::Address(AddressError::BadHost))
         );
+        assert!(parse_clipboard("center:7878 ABC-DEF").is_ok());
         for code in ["AB!CD", "AB\u{0}CD", "ÄBC", &"A".repeat(17)] {
             assert_eq!(
                 parse_clipboard(&format!("100.71.140.68:7878 {code}")),
@@ -451,6 +481,70 @@ mod tests {
         assert_eq!(device_name(Some("")), "ullage-win");
         assert_eq!(device_name(None), "ullage-win");
         assert_eq!(device_name(Some(&"a".repeat(100))).len(), 64);
+    }
+
+    fn pair_named(
+        resolver: &Fake,
+        server: &super::super::testserver::Server,
+    ) -> Result<Token, PairError> {
+        let address = RemoteAddress::parse(&format!("center:{}", server.address.port())).unwrap();
+        let code = PairCode::parse("ABC-DEF").unwrap();
+        pair_in(
+            &address,
+            &code,
+            "FLY",
+            Deadline::after(Duration::from_secs(5)),
+            resolver,
+        )
+    }
+
+    #[test]
+    fn a_pairing_with_a_host_name_goes_to_the_address_it_resolves_to() {
+        let body = format!("{{\"device_token\":\"{}\"}}", "A".repeat(43));
+        let server = serve(vec![Reply::Raw(super::super::testserver::ok(
+            body.as_bytes(),
+        ))]);
+        let resolver = Fake::answering(&["127.0.0.1"]);
+        assert!(pair_named(&resolver, &server).is_ok());
+        let seen = server.finish();
+        // `Host` is the address connected to, never the name.
+        let host = format!("Host: 127.0.0.1:{}\r\n", seen[0].address.port());
+        assert!(seen[0].head.contains(&host), "{}", seen[0].head);
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_a_public_address_gets_no_pairing_code() {
+        let server = serve(vec![Reply::Raw(super::super::testserver::ok(b"{}"))]);
+        let resolver = Fake::answering(&["127.0.0.1", "8.8.8.8"]);
+        let ip: Ipv4Addr = "8.8.8.8".parse().unwrap();
+        assert_eq!(
+            pair_named(&resolver, &server).unwrap_err(),
+            PairError::AddressRefused(ip)
+        );
+        let (seen, accepted) = server.finish_after(Duration::from_millis(200));
+        assert!(seen.is_empty());
+        assert_eq!(accepted, 0);
+        // The words name the address and hold no code.
+        let words = PairError::AddressRefused(ip).to_string();
+        assert!(words.contains("8.8.8.8") && !words.contains("ABC"));
+    }
+
+    #[test]
+    fn a_name_that_does_not_resolve_is_unreachable() {
+        let server = serve(vec![Reply::Raw(super::super::testserver::ok(b"{}"))]);
+        for error in [
+            ResolveError::LookupFailed,
+            ResolveError::NoAddress,
+            ResolveError::Timeout,
+        ] {
+            let resolver = Fake::failing(error);
+            assert_eq!(
+                pair_named(&resolver, &server).unwrap_err(),
+                PairError::Unreachable
+            );
+        }
+        let (seen, _) = server.finish_after(Duration::from_millis(100));
+        assert!(seen.is_empty());
     }
 
     #[test]

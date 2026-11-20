@@ -6,6 +6,7 @@ use ullage_cli::usage_view::{FetchError, UsageFetch, fetch_usage};
 use super::address::RemoteAddress;
 use super::client::{FETCH_TIMEOUT, HttpClient};
 use super::http::Deadline;
+use super::resolve::{Resolver, SystemResolver};
 use super::store::{TokenStore, credential_for};
 use crate::state::FailureKind;
 
@@ -31,18 +32,33 @@ fn fetch_remote_by(
     address: &RemoteAddress,
     deadline: Deadline,
 ) -> Result<UsageFetch, FailureKind> {
+    fetch_remote_in(store, address, deadline, &SystemResolver)
+}
+
+/// [`fetch_remote_by`] with the resolver of host names a test may replace.
+fn fetch_remote_in(
+    store: &dyn TokenStore,
+    address: &RemoteAddress,
+    deadline: Deadline,
+    resolver: &dyn Resolver,
+) -> Result<UsageFetch, FailureKind> {
     let result = match credential_for(store, address) {
         // The answer to "not paired" is judged too: the credential store may
         // have been slow, and a late answer is a timeout, which keeps what the
         // window shows.
         None => Err(FailureKind::NotPaired),
         Some(credential) => {
-            let client = HttpClient::new(*address, credential.token, deadline);
+            let client =
+                HttpClient::with_resolver(address.clone(), credential.token, deadline, resolver);
             fetch_usage(&client).map_err(|error| {
-                // `ClientError` has no word for a refused token: the client
-                // noted it.
+                // `ClientError` has no word for a refused token, or for an
+                // address that may not receive it: the client noted them.
                 if error == FetchError::InvalidResponse && client.was_rejected() {
                     FailureKind::TokenRejected
+                } else if let (FetchError::InvalidResponse, Some(ip)) =
+                    (&error, client.refused_address())
+                {
+                    FailureKind::AddressRefused(ip)
                 } else {
                     FailureKind::Fetch(error)
                 }
@@ -59,6 +75,7 @@ mod tests {
     use serde_json::json;
     use ullage_protocol::{CONTROL_PROTOCOL_VERSION, ControlError, ControlResult};
 
+    use super::super::resolve::{ResolveError, fake::Fake};
     use super::super::store::{Credential, Token, memory::MemoryStore};
     use super::super::testserver::{Reply, ok, reply, serve};
     use super::*;
@@ -79,12 +96,93 @@ mod tests {
         serde_json::to_vec(&document).unwrap()
     }
 
+    fn named(server: &super::super::testserver::Server) -> RemoteAddress {
+        RemoteAddress::parse(&format!("center:{}", server.address.port())).unwrap()
+    }
+
+    #[test]
+    fn a_host_name_is_fetched_through_its_resolved_address() {
+        let server = serve(vec![Reply::Raw(ok(&body(ControlResult::Snapshots(
+            Vec::new(),
+        ))))]);
+        let address = named(&server);
+        let resolver = Fake::answering(&["127.0.0.1"]);
+        let fetched = fetch_remote_in(
+            &store_for(address.clone()),
+            &address,
+            Deadline::after(FETCH_TIMEOUT),
+            &resolver,
+        )
+        .unwrap();
+        assert!(fetched.snapshots.is_empty());
+    }
+
+    #[test]
+    fn a_token_saved_for_a_name_is_not_used_for_another_name_of_the_same_host() {
+        let server = serve(vec![Reply::Raw(ok(&body(ControlResult::Snapshots(
+            Vec::new(),
+        ))))]);
+        let saved = RemoteAddress::parse(&format!("center:{}", server.address.port())).unwrap();
+        let other = RemoteAddress::parse(&format!("nas:{}", server.address.port())).unwrap();
+        let resolver = Fake::answering(&["127.0.0.1"]);
+        for asked in [other, server.address.clone()] {
+            assert_eq!(
+                fetch_remote_in(
+                    &store_for(saved.clone()),
+                    &asked,
+                    Deadline::after(FETCH_TIMEOUT),
+                    &resolver
+                )
+                .unwrap_err(),
+                FailureKind::NotPaired
+            );
+        }
+        assert_eq!(resolver.calls.get(), 0);
+        let (seen, accepted) = server.finish_after(Duration::from_millis(200));
+        assert!(seen.is_empty());
+        assert_eq!(accepted, 0);
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_a_public_address_is_refused_with_that_address() {
+        let address = RemoteAddress::parse("center:7878").unwrap();
+        let resolver = Fake::answering(&["100.71.140.68", "8.8.8.8"]);
+        assert_eq!(
+            fetch_remote_in(
+                &store_for(address.clone()),
+                &address,
+                Deadline::after(FETCH_TIMEOUT),
+                &resolver
+            )
+            .unwrap_err(),
+            FailureKind::AddressRefused("8.8.8.8".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn a_name_that_does_not_resolve_is_an_unavailable_daemon() {
+        let address = RemoteAddress::parse("center:7878").unwrap();
+        for error in [ResolveError::LookupFailed, ResolveError::NoAddress] {
+            let resolver = Fake::failing(error);
+            assert_eq!(
+                fetch_remote_in(
+                    &store_for(address.clone()),
+                    &address,
+                    Deadline::after(FETCH_TIMEOUT),
+                    &resolver
+                )
+                .unwrap_err(),
+                FailureKind::Fetch(FetchError::DaemonUnavailable)
+            );
+        }
+    }
+
     #[test]
     fn a_working_daemon_gives_its_snapshots() {
         let server = serve(vec![Reply::Raw(ok(&body(ControlResult::Snapshots(
             Vec::new(),
         ))))]);
-        let fetched = fetch_remote(&store_for(server.address), &server.address).unwrap();
+        let fetched = fetch_remote(&store_for(server.address.clone()), &server.address).unwrap();
         assert!(fetched.snapshots.is_empty());
     }
 
@@ -111,12 +209,12 @@ mod tests {
     fn a_refused_token_is_told_from_an_unreadable_answer() {
         let server = serve(vec![Reply::Raw(reply("401 Unauthorized", &[], b"{}"))]);
         assert_eq!(
-            fetch_remote(&store_for(server.address), &server.address).unwrap_err(),
+            fetch_remote(&store_for(server.address.clone()), &server.address).unwrap_err(),
             FailureKind::TokenRejected
         );
         let server = serve(vec![Reply::Raw(ok(b"not json"))]);
         assert_eq!(
-            fetch_remote(&store_for(server.address), &server.address).unwrap_err(),
+            fetch_remote(&store_for(server.address.clone()), &server.address).unwrap_err(),
             FailureKind::Fetch(FetchError::InvalidResponse)
         );
     }
@@ -135,7 +233,8 @@ mod tests {
             &[],
             document.to_string().as_bytes(),
         ))]);
-        let failure = fetch_remote(&store_for(server.address), &server.address).unwrap_err();
+        let failure =
+            fetch_remote(&store_for(server.address.clone()), &server.address).unwrap_err();
         let FailureKind::Fetch(FetchError::Daemon(result)) = failure else {
             panic!("{failure:?}");
         };
@@ -148,7 +247,7 @@ mod tests {
             gone.unwrap()
         };
         assert_eq!(
-            fetch_remote(&store_for(gone), &gone).unwrap_err(),
+            fetch_remote(&store_for(gone.clone()), &gone).unwrap_err(),
             FailureKind::Fetch(FetchError::DaemonUnavailable)
         );
     }
@@ -167,7 +266,7 @@ mod tests {
         ] {
             let server = serve(vec![Reply::Raw(reply)]);
             let result = fetch_remote_by(
-                &store_for(server.address),
+                &store_for(server.address.clone()),
                 &server.address,
                 late_at_the_end(),
             );
@@ -190,7 +289,7 @@ mod tests {
                 FailureKind::Fetch(FetchError::DaemonUnavailable)
             );
         }
-        let unreadable = store_for(server.address);
+        let unreadable = store_for(server.address.clone());
         unreadable.fail_load.set(true);
         assert_eq!(
             fetch_remote_by(&unreadable, &server.address, late()).unwrap_err(),
@@ -215,7 +314,8 @@ mod tests {
             &[],
             mismatch.to_string().as_bytes(),
         ))]);
-        let failure = fetch_remote(&store_for(server.address), &server.address).unwrap_err();
+        let failure =
+            fetch_remote(&store_for(server.address.clone()), &server.address).unwrap_err();
         let FailureKind::Fetch(FetchError::ProtocolMismatch {
             supported_version, ..
         }) = failure

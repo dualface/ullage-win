@@ -162,7 +162,7 @@ mod tests {
         let address = RemoteAddress::parse("100.71.140.68:7878").unwrap();
         let other = RemoteAddress::parse("10.0.0.1:7878").unwrap();
         let credential = Credential {
-            address,
+            address: address.clone(),
             token: Token::parse("tok").unwrap(),
         };
         let store = memory::MemoryStore::with(credential.clone());
@@ -174,6 +174,30 @@ mod tests {
             credential_for(&memory::MemoryStore::default(), &address),
             None
         );
+    }
+
+    #[test]
+    fn a_token_is_bound_to_the_text_of_the_address_it_was_saved_for() {
+        let by_name = RemoteAddress::parse("Center:7878").unwrap();
+        let store = memory::MemoryStore::with(Credential {
+            address: by_name,
+            token: Token::parse("tok").unwrap(),
+        });
+        // The case of a name does not matter, but the name does: not another
+        // name, and not the address it happens to resolve to.
+        for same in ["center:7878", "CENTER:7878"] {
+            let asked = RemoteAddress::parse(same).unwrap();
+            assert!(credential_for(&store, &asked).is_some(), "{same}");
+        }
+        for other in [
+            "nas:7878",
+            "center:7879",
+            "center.ts.net:7878",
+            "100.71.140.68:7878",
+        ] {
+            let asked = RemoteAddress::parse(other).unwrap();
+            assert!(credential_for(&store, &asked).is_none(), "{other}");
+        }
     }
 
     #[test]

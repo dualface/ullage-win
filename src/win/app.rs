@@ -343,7 +343,7 @@ impl App {
     /// The remote daemon the window asks, when it asks one.
     fn remote(&self) -> Option<RemoteAddress> {
         match self.prefs.connection {
-            Connection::Remote => self.prefs.remote_address,
+            Connection::Remote => self.prefs.remote_address.clone(),
             Connection::Local => None,
         }
     }
@@ -590,7 +590,7 @@ impl App {
             autostart: registry::autostart_enabled(),
             shortcut: self.shortcut,
             connection: self.prefs.connection,
-            remote: self.prefs.remote_address,
+            remote: self.prefs.remote_address.clone(),
             remote_paired: self.remote_paired(),
         }
     }
@@ -656,7 +656,8 @@ impl App {
     fn remote_paired(&self) -> bool {
         self.prefs
             .remote_address
-            .is_some_and(|address| credential_for(&CredStore, &address).is_some())
+            .as_ref()
+            .is_some_and(|address| credential_for(&CredStore, address).is_some())
     }
 
     /// Saves `next` as the settings. The caller makes it the settings in
@@ -744,10 +745,13 @@ impl App {
             dialog = Some(Dialog::Notice(match ended.outcome {
                 Err(error) => format!("Pairing with {address} failed. {error}"),
                 Ok(token) => {
-                    let credential = Credential { address, token };
+                    let credential = Credential {
+                        address: address.clone(),
+                        token,
+                    };
                     let mut next = self.prefs.clone();
                     next.connection = Connection::Remote;
-                    next.remote_address = Some(address);
+                    next.remote_address = Some(address.clone());
                     let kept = pairing::apply(&CredStore, &credential, || self.persist(&next));
                     match kept {
                         Ok(()) => {

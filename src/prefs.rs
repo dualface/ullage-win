@@ -324,7 +324,7 @@ mod tests {
             // Remote without an address, or with one that is not allowed.
             r#"{"version":1,"text_size":16,"connection":"remote"}"#,
             r#"{"version":1,"text_size":16,"connection":"remote","remote_address":"8.8.8.8:80"}"#,
-            r#"{"version":1,"text_size":16,"connection":"remote","remote_address":"center:7878"}"#,
+            r#"{"version":1,"text_size":16,"connection":"remote","remote_address":"under_score:7878"}"#,
             r#"{"version":1,"text_size":16,"connection":"remote","remote_address":7}"#,
         ] {
             let prefs = read(text);
@@ -334,6 +334,17 @@ mod tests {
         let kept =
             read(r#"{"version":1,"connection":"elsewhere","remote_address":"100.71.140.68:7878"}"#);
         assert!(kept.remote_address.is_some());
+    }
+
+    #[test]
+    fn a_host_name_is_a_good_remote_address() {
+        let prefs =
+            read(r#"{"version":1,"connection":"remote","remote_address":"Center.TS.net:7878"}"#);
+        assert_eq!(prefs.connection, Connection::Remote);
+        assert_eq!(
+            prefs.remote_address.unwrap().to_string(),
+            "center.ts.net:7878"
+        );
     }
 
     #[test]

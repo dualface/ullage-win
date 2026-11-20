@@ -8,10 +8,8 @@
 //! daemon that stops talking cannot hold the caller for longer than that.
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddrV4, TcpStream};
 use std::time::{Duration, Instant};
-
-use super::address::RemoteAddress;
 
 /// The most a body may hold. The daemon's own answers are far smaller.
 pub const MAX_BODY: usize = 4 * 1024 * 1024;
@@ -111,15 +109,46 @@ impl Deadline {
     }
 }
 
-/// Sends `request` to `address`, and reads the answer, within `deadline`.
+/// What one attempt to connect may take: an even share of what is left, so
+/// that an address that never answers cannot use up the time of the ones
+/// after it. The last address may use all that is left.
+pub fn attempt_budget(remaining: Duration, addresses_left: usize) -> Duration {
+    match u32::try_from(addresses_left) {
+        Ok(count) if count > 1 => remaining / count,
+        _ => remaining,
+    }
+}
+
+/// Connects to the first of `addresses` that answers.
+fn connect(addresses: &[SocketAddrV4], deadline: &Deadline) -> Result<TcpStream, HttpError> {
+    let mut last = HttpError::Unreachable;
+    for (index, address) in addresses.iter().enumerate() {
+        let budget = attempt_budget(deadline.remaining()?, addresses.len() - index);
+        match TcpStream::connect_timeout(&(*address).into(), budget) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = io_error(error),
+        }
+    }
+    Err(last)
+}
+
+/// Sends `request` to the first of `addresses` that accepts a connection,
+/// and reads the answer, within `deadline`. The `Host` header names the
+/// address that was connected to, because the daemon accepts only the
+/// addresses it listens on, and never the name that was resolved to them.
 pub fn send(
-    address: &RemoteAddress,
+    addresses: &[SocketAddrV4],
     request: &Request<'_>,
     deadline: &Deadline,
 ) -> Result<Response, HttpError> {
-    let head = build_head(address, request)?;
-    let mut stream = TcpStream::connect_timeout(&address.socket_addr(), deadline.remaining()?)
-        .map_err(io_error)?;
+    // A request that cannot be sent is refused before any connection.
+    build_head(*addresses.first().ok_or(HttpError::Unreachable)?, request)?;
+    let mut stream = connect(addresses, deadline)?;
+    let peer = match stream.peer_addr() {
+        Ok(std::net::SocketAddr::V4(peer)) => peer,
+        _ => return Err(HttpError::Unreachable),
+    };
+    let head = build_head(peer, request)?;
     write_all(&mut stream, &head, deadline)?;
     if let Some(body) = request.body {
         write_all(&mut stream, body, deadline)?;
@@ -159,7 +188,7 @@ fn is_plain(text: &str) -> bool {
     text.bytes().all(|byte| (0x20..0x7f).contains(&byte))
 }
 
-fn build_head(address: &RemoteAddress, request: &Request<'_>) -> Result<Vec<u8>, HttpError> {
+fn build_head(host: SocketAddrV4, request: &Request<'_>) -> Result<Vec<u8>, HttpError> {
     let path_ok = request.path.starts_with('/')
         && request
             .path
@@ -169,7 +198,7 @@ fn build_head(address: &RemoteAddress, request: &Request<'_>) -> Result<Vec<u8>,
         return Err(HttpError::Invalid);
     }
     let mut head = format!(
-        "{} {} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nAccept: application/json\r\n",
+        "{} {} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAccept: application/json\r\n",
         request.method, request.path
     );
     for (name, value) in request.headers {
@@ -317,7 +346,12 @@ mod tests {
     #[test]
     fn a_get_sends_the_host_and_the_headers_it_was_given() {
         let server = serve(vec![Reply::Raw(ok(b"{}"))]);
-        let response = send(&server.address, &get("/v1/usage"), &Deadline::after(WAIT)).unwrap();
+        let response = send(
+            &[server.address.literal().unwrap()],
+            &get("/v1/usage"),
+            &Deadline::after(WAIT),
+        )
+        .unwrap();
         assert_eq!(
             response,
             Response {
@@ -343,7 +377,12 @@ mod tests {
             headers: &[("Content-Type", "application/json")],
             body: Some(b"{\"a\":1}"),
         };
-        send(&server.address, &request, &Deadline::after(WAIT)).unwrap();
+        send(
+            &[server.address.literal().unwrap()],
+            &request,
+            &Deadline::after(WAIT),
+        )
+        .unwrap();
         let seen = server.finish();
         assert!(seen[0].head.contains("Content-Length: 7\r\n"));
         assert!(seen[0].head.contains("Content-Type: application/json\r\n"));
@@ -355,7 +394,12 @@ mod tests {
         let server = serve(vec![Reply::Raw(
             b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello".to_vec(),
         )]);
-        let response = send(&server.address, &get("/x"), &Deadline::after(WAIT)).unwrap();
+        let response = send(
+            &[server.address.literal().unwrap()],
+            &get("/x"),
+            &Deadline::after(WAIT),
+        )
+        .unwrap();
         assert_eq!(response.body, b"hello");
     }
 
@@ -368,7 +412,12 @@ mod tests {
             Reply::Raw(reply("302 Found", &[("Location", &location)], b"")),
             Reply::Raw(ok(b"must not be asked for either")),
         ]);
-        let response = send(&server.address, &get("/x"), &Deadline::after(WAIT)).unwrap();
+        let response = send(
+            &[server.address.literal().unwrap()],
+            &get("/x"),
+            &Deadline::after(WAIT),
+        )
+        .unwrap();
         assert_eq!(response.status, 302);
         assert_eq!(server.finish_after(Duration::from_millis(200)).0.len(), 1);
         // Nothing connected to where the redirect points, not even to
@@ -384,7 +433,11 @@ mod tests {
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n".to_vec(),
         )]);
         assert_eq!(
-            send(&server.address, &get("/x"), &Deadline::after(WAIT)),
+            send(
+                &[server.address.literal().unwrap()],
+                &get("/x"),
+                &Deadline::after(WAIT)
+            ),
             Err(HttpError::Invalid)
         );
     }
@@ -404,7 +457,11 @@ mod tests {
         ] {
             let server = serve(vec![Reply::Raw(raw.to_vec())]);
             assert_eq!(
-                send(&server.address, &get("/x"), &Deadline::after(WAIT)),
+                send(
+                    &[server.address.literal().unwrap()],
+                    &get("/x"),
+                    &Deadline::after(WAIT)
+                ),
                 Err(HttpError::Invalid),
                 "{:?}",
                 String::from_utf8_lossy(raw)
@@ -418,7 +475,11 @@ mod tests {
         raw.extend(std::iter::repeat_n(b'a', MAX_HEAD + 100));
         let server = serve(vec![Reply::Raw(raw)]);
         assert_eq!(
-            send(&server.address, &get("/x"), &Deadline::after(WAIT)),
+            send(
+                &[server.address.literal().unwrap()],
+                &get("/x"),
+                &Deadline::after(WAIT)
+            ),
             Err(HttpError::Invalid)
         );
     }
@@ -431,30 +492,110 @@ mod tests {
         );
         let server = serve(vec![Reply::Raw(declared.into_bytes())]);
         assert_eq!(
-            send(&server.address, &get("/x"), &Deadline::after(WAIT)),
+            send(
+                &[server.address.literal().unwrap()],
+                &get("/x"),
+                &Deadline::after(WAIT)
+            ),
             Err(HttpError::TooLarge)
         );
         let mut streamed = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
         streamed.extend(std::iter::repeat_n(b'a', MAX_BODY + 1));
         let server = serve(vec![Reply::Raw(streamed)]);
         assert_eq!(
-            send(&server.address, &get("/x"), &Deadline::after(WAIT)),
+            send(
+                &[server.address.literal().unwrap()],
+                &get("/x"),
+                &Deadline::after(WAIT)
+            ),
             Err(HttpError::TooLarge)
         );
     }
 
     #[test]
     fn a_refused_connection_is_unreachable() {
-        let address = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let address = RemoteAddress::parse(&listener.local_addr().unwrap().to_string());
-            drop(listener);
-            address.unwrap()
-        };
+        let address = refused_address();
         assert_eq!(
-            send(&address, &get("/x"), &Deadline::after(WAIT)),
+            send(&[address], &get("/x"), &Deadline::after(WAIT)),
             Err(HttpError::Unreachable)
         );
+    }
+
+    /// A loopback address that nothing listens on.
+    fn refused_address() -> SocketAddrV4 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let std::net::SocketAddr::V4(address) = listener.local_addr().unwrap() else {
+            unreachable!("bound to an IPv4 address");
+        };
+        address
+    }
+
+    #[test]
+    fn the_first_address_that_answers_is_used() {
+        let server = serve(vec![Reply::Raw(ok(b"{}"))]);
+        let live = server.address.literal().unwrap();
+        let response = send(
+            &[refused_address(), live, refused_address()],
+            &get("/x"),
+            &Deadline::after(WAIT),
+        )
+        .unwrap();
+        assert_eq!(response.status, 200);
+        // The `Host` header is the address that was connected to.
+        let seen = server.finish();
+        assert!(seen[0].head.contains(&format!("Host: {live}\r\n")));
+    }
+
+    #[test]
+    fn all_addresses_refused_is_unreachable() {
+        assert_eq!(
+            send(
+                &[refused_address(), refused_address()],
+                &get("/x"),
+                &Deadline::after(WAIT)
+            ),
+            Err(HttpError::Unreachable)
+        );
+    }
+
+    #[test]
+    fn no_address_is_unreachable() {
+        assert_eq!(
+            send(&[], &get("/x"), &Deadline::after(WAIT)),
+            Err(HttpError::Unreachable)
+        );
+    }
+
+    #[test]
+    fn a_bad_request_is_refused_before_any_connection() {
+        let server = serve(vec![Reply::Raw(ok(b"{}"))]);
+        let request = Request {
+            method: "GET",
+            path: "no-slash",
+            headers: &[],
+            body: None,
+        };
+        assert_eq!(
+            send(
+                &[server.address.literal().unwrap()],
+                &request,
+                &Deadline::after(WAIT)
+            ),
+            Err(HttpError::Invalid)
+        );
+        let (seen, accepted) = server.finish_after(Duration::from_millis(100));
+        assert!(seen.is_empty());
+        assert_eq!(accepted, 0);
+    }
+
+    #[test]
+    fn an_attempt_gets_an_even_share_of_what_is_left() {
+        let second = Duration::from_secs(1);
+        assert_eq!(attempt_budget(second * 30, 3), second * 10);
+        assert_eq!(attempt_budget(second * 30, 2), second * 15);
+        // The last address, or none, may use all that is left.
+        assert_eq!(attempt_budget(second * 30, 1), second * 30);
+        assert_eq!(attempt_budget(second * 30, 0), second * 30);
     }
 
     #[test]
@@ -463,7 +604,7 @@ mod tests {
         let started = Instant::now();
         assert_eq!(
             send(
-                &server.address,
+                &[server.address.literal().unwrap()],
                 &get("/x"),
                 &Deadline::after(Duration::from_millis(300))
             ),
@@ -503,7 +644,7 @@ mod tests {
 
     #[test]
     fn nothing_that_could_start_a_new_line_goes_into_a_request() {
-        let address = RemoteAddress::parse("127.0.0.1:1").unwrap();
+        let address: SocketAddrV4 = "127.0.0.1:1".parse().unwrap();
         let bad = |method, path, headers: &[(&str, &str)]| {
             let request = Request {
                 method,
@@ -511,7 +652,7 @@ mod tests {
                 headers,
                 body: None,
             };
-            build_head(&address, &request)
+            build_head(address, &request)
         };
         assert!(bad("GET", "/ok", &[]).is_ok());
         assert_eq!(bad("PUT", "/ok", &[]), Err(HttpError::Invalid));

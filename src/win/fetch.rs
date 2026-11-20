@@ -20,7 +20,7 @@ pub const WM_FETCH_DONE: u32 = WM_APP + 2;
 pub type Outcome = Result<UsageFetch, FailureKind>;
 
 /// Which daemon a fetch asks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
     Local,
     Remote(RemoteAddress),

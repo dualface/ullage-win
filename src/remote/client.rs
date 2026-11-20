@@ -7,6 +7,7 @@
 //! `ControlResponse` the control socket would have given.
 
 use std::cell::Cell;
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -17,6 +18,7 @@ use ullage_protocol::{
 
 use super::address::RemoteAddress;
 use super::http::{self, Deadline, HttpError, Request};
+use super::resolve::{ResolveError, Resolver, resolve};
 use super::store::Token;
 
 /// The longest one fetch may take, from the entry of `fetch_remote` to the
@@ -24,21 +26,38 @@ use super::store::Token;
 /// request, the answer, and the checks of `fetch_usage` all spend it.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub struct HttpClient {
+pub struct HttpClient<'a> {
     address: RemoteAddress,
     token: Token,
     /// The limit of the whole fetch this client is made for.
     deadline: Deadline,
+    /// Where the addresses of a host name come from.
+    resolver: &'a dyn Resolver,
     rejected: Cell<bool>,
+    refused: Cell<Option<Ipv4Addr>>,
 }
 
-impl HttpClient {
+#[cfg(test)]
+impl HttpClient<'static> {
     pub fn new(address: RemoteAddress, token: Token, deadline: Deadline) -> Self {
+        Self::with_resolver(address, token, deadline, &super::resolve::SystemResolver)
+    }
+}
+
+impl<'a> HttpClient<'a> {
+    pub fn with_resolver(
+        address: RemoteAddress,
+        token: Token,
+        deadline: Deadline,
+        resolver: &'a dyn Resolver,
+    ) -> Self {
         Self {
             address,
             token,
             deadline,
+            resolver,
             rejected: Cell::new(false),
+            refused: Cell::new(None),
         }
     }
 
@@ -48,9 +67,16 @@ impl HttpClient {
     pub fn was_rejected(&self) -> bool {
         self.rejected.get()
     }
+
+    /// The address the name of the daemon resolved to, when it may not
+    /// receive the token and nothing was sent. Like `was_rejected`, this is
+    /// asked after a failed fetch, because `ClientError` has no word for it.
+    pub fn refused_address(&self) -> Option<Ipv4Addr> {
+        self.refused.get()
+    }
 }
 
-impl ControlClient for HttpClient {
+impl ControlClient for HttpClient<'_> {
     fn send(&self, request: &ControlRequest) -> Result<ControlResponse, ClientError> {
         // Every way out passes the deadline: an answer, or an error, that is
         // ready only after it is a timeout.
@@ -59,15 +85,23 @@ impl ControlClient for HttpClient {
     }
 }
 
-impl HttpClient {
+impl HttpClient<'_> {
     fn exchange(&self, request: &ControlRequest) -> Result<ControlResponse, ClientError> {
         // The only request the HTTP API answers the way the window needs it.
         if !matches!(request.command, ControlCommand::Show { account_id: None }) {
             return Err(ClientError::InvalidResponse);
         }
+        let addresses = match resolve(&self.address, self.resolver, &self.deadline) {
+            Ok(addresses) => addresses,
+            Err(ResolveError::NotAllowed(ip)) => {
+                self.refused.set(Some(ip));
+                return Err(ClientError::InvalidResponse);
+            }
+            Err(_) => return Err(ClientError::DaemonUnavailable),
+        };
         let authorization = format!("Bearer {}", self.token.expose());
         let answer = http::send(
-            &self.address,
+            &addresses,
             &Request {
                 method: "GET",
                 path: "/v1/usage",
@@ -181,6 +215,7 @@ mod tests {
     use serde_json::json;
     use ullage_protocol::CONTROL_PROTOCOL_VERSION;
 
+    use super::super::resolve::fake::Fake;
     use super::super::testserver::{Reply, ok, reply, serve};
     use super::*;
 
@@ -314,12 +349,95 @@ mod tests {
         }
     }
 
-    fn client(server: &super::super::testserver::Server) -> HttpClient {
+    fn client(server: &super::super::testserver::Server) -> HttpClient<'_> {
         HttpClient::new(
-            server.address,
+            server.address.clone(),
             Token::parse(TOKEN).unwrap(),
             Deadline::after(Duration::from_secs(5)),
         )
+    }
+
+    /// `center:<port of the server>`, which a fake resolver maps to the loopback.
+    fn named(server: &super::super::testserver::Server) -> RemoteAddress {
+        RemoteAddress::parse(&format!("center:{}", server.address.port())).unwrap()
+    }
+
+    #[test]
+    fn a_host_name_is_resolved_and_the_host_header_is_the_address_connected_to() {
+        let server = serve(vec![Reply::Raw(ok(&snapshots_body("http-3")))]);
+        let resolver = Fake::answering(&["127.0.0.1"]);
+        let client = HttpClient::with_resolver(
+            named(&server),
+            Token::parse(TOKEN).unwrap(),
+            Deadline::after(Duration::from_secs(5)),
+            &resolver,
+        );
+        client.send(&show_all()).unwrap();
+        assert_eq!(resolver.calls.get(), 1);
+        let seen = server.finish();
+        // The daemon takes only the addresses it listens on as `Host`: the
+        // name is never sent.
+        let host = format!("Host: 127.0.0.1:{}\r\n", seen[0].address.port());
+        assert!(seen[0].head.contains(&host), "{}", seen[0].head);
+        assert!(!seen[0].head.contains("center"));
+    }
+
+    #[test]
+    fn the_first_address_of_a_name_that_answers_is_used() {
+        let server = serve(vec![Reply::Raw(ok(&snapshots_body("http-3")))]);
+        // Nothing listens on the first address of the name.
+        let resolver = Fake::answering(&["127.0.0.2", "127.0.0.1"]);
+        let client = HttpClient::with_resolver(
+            named(&server),
+            Token::parse(TOKEN).unwrap(),
+            Deadline::after(Duration::from_secs(5)),
+            &resolver,
+        );
+        client.send(&show_all()).unwrap();
+        assert_eq!(server.finish().len(), 1);
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_a_public_address_sends_nothing() {
+        let server = serve(vec![Reply::Raw(ok(&snapshots_body("http-3")))]);
+        let resolver = Fake::answering(&["127.0.0.1", "8.8.8.8"]);
+        let client = HttpClient::with_resolver(
+            named(&server),
+            Token::parse(TOKEN).unwrap(),
+            Deadline::after(Duration::from_secs(5)),
+            &resolver,
+        );
+        assert!(matches!(
+            client.send(&show_all()),
+            Err(ClientError::InvalidResponse)
+        ));
+        assert_eq!(client.refused_address(), Some("8.8.8.8".parse().unwrap()));
+        assert!(!client.was_rejected());
+        let (seen, accepted) = server.finish_after(Duration::from_millis(200));
+        assert!(seen.is_empty());
+        assert_eq!(accepted, 0);
+    }
+
+    #[test]
+    fn a_name_that_does_not_resolve_is_an_unavailable_daemon() {
+        for error in [
+            ResolveError::LookupFailed,
+            ResolveError::NoAddress,
+            ResolveError::Timeout,
+        ] {
+            let resolver = Fake::failing(error);
+            let client = HttpClient::with_resolver(
+                RemoteAddress::parse("center:7878").unwrap(),
+                Token::parse(TOKEN).unwrap(),
+                Deadline::after(Duration::from_secs(5)),
+                &resolver,
+            );
+            assert!(matches!(
+                client.send(&show_all()),
+                Err(ClientError::DaemonUnavailable)
+            ));
+            assert_eq!(client.refused_address(), None);
+        }
     }
 
     #[test]
@@ -381,7 +499,7 @@ mod tests {
         ] {
             let server = serve(vec![Reply::Raw(reply)]);
             let late = HttpClient::new(
-                server.address,
+                server.address.clone(),
                 Token::parse(TOKEN).unwrap(),
                 Deadline::late_after(Duration::from_secs(5)),
             );

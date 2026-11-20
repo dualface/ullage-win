@@ -91,7 +91,7 @@ impl Command {
 }
 
 /// The current settings the menu shows.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct MenuState {
     pub window_visible: bool,
     pub layout: Layout,
@@ -474,6 +474,25 @@ mod tests {
         assert_eq!(label(&items[1]), "Remote daemon (100.71.140.68:7878)");
         assert!(!enabled(&items[1]));
         assert!(enabled(&items[4]));
+    }
+
+    #[test]
+    fn a_name_says_plaintext_unless_it_is_localhost_or_a_tailnet_name() {
+        let mut state = state();
+        for (text, plain) in [
+            ("center:7878", true),
+            ("center.lan:7878", true),
+            ("center.tailnet.ts.net:7878", false),
+            ("localhost:7878", false),
+        ] {
+            state.remote = RemoteAddress::parse(text).ok();
+            let expected = if plain {
+                format!("Remote daemon ({text}) (plaintext)")
+            } else {
+                format!("Remote daemon ({text})")
+            };
+            assert_eq!(label(&connection_items(&state)[1]), expected, "{text}");
+        }
     }
 
     #[test]
