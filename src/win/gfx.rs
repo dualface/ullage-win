@@ -2,33 +2,37 @@
 
 use std::rc::Rc;
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_UNKNOWN, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
+    D2D_RECT_F, D2D_SIZE_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
     D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
     D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL,
     D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_ELLIPSE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_NONE,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE,
-    D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1CreateFactory, ID2D1Factory, ID2D1GeometrySink,
-    ID2D1HwndRenderTarget, ID2D1PathGeometry, ID2D1RenderTarget, ID2D1SolidColorBrush,
+    D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory,
+    ID2D1GeometrySink, ID2D1PathGeometry, ID2D1RenderTarget, ID2D1SolidColorBrush,
     ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL;
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, GdiFlush};
+use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
 use windows::core::{Interface, Result};
 use windows_numerics::{Matrix3x2, Vector2};
 
+use super::surface::Surface;
 use super::text::Typography;
 use crate::icons::{Mark, Prim, marks};
-use crate::scene::{DotFill, Icon, Rect, Scene, Shape, Text};
+use crate::scene::{BORDER, DotFill, Icon, Rect, Scene, Shape, Text};
 use crate::svgpath::{Seg, parse};
 use crate::theme::{Color, Mode, Role};
+
+const WINDOW_RADIUS: f32 = 8.0;
 
 pub fn d2d_color(color: Color) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
@@ -449,9 +453,9 @@ impl Painter {
         unsafe { self.target.EndDraw(None, None) }
     }
 
-    pub fn clear(&self, role: Role) {
+    pub fn clear_transparent(&self) {
         unsafe {
-            self.target.Clear(Some(&d2d_color(self.mode.color(role))));
+            self.target.Clear(Some(&D2D1_COLOR_F::default()));
         }
     }
 
@@ -482,86 +486,145 @@ fn end_figure(sink: &ID2D1GeometrySink, open: &mut bool, filled: bool) {
     }
 }
 
-/// The window's drawing surface.
+/// The window's drawing surface: a bitmap in memory that Direct2D draws on
+/// in software and that is handed to the window with per-pixel alpha. That
+/// needs no graphics hardware, and the corners of the window are the
+/// bitmap's own transparent pixels.
 pub struct Renderer {
-    target: ID2D1HwndRenderTarget,
+    factory: ID2D1Factory,
+    surface: Surface,
+    target: ID2D1DCRenderTarget,
     painter: Painter,
+    text: Rc<Typography>,
+    dpi: u32,
+}
+
+fn make_target(factory: &ID2D1Factory, surface: &Surface, dpi: u32) -> Result<ID2D1DCRenderTarget> {
+    unsafe {
+        let properties = D2D1_RENDER_TARGET_PROPERTIES {
+            r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: dpi as f32,
+            dpiY: dpi as f32,
+            usage: D2D1_RENDER_TARGET_USAGE_NONE,
+            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+        };
+        let target = factory.CreateDCRenderTarget(&properties)?;
+        target.BindDC(
+            surface.hdc,
+            &RECT {
+                left: 0,
+                top: 0,
+                right: surface.size.0,
+                bottom: surface.size.1,
+            },
+        )?;
+        Ok(target)
+    }
 }
 
 impl Renderer {
-    pub fn new(hwnd: HWND, size: (u32, u32), dpi: u32, text: Rc<Typography>) -> Result<Self> {
+    pub fn new(size: (i32, i32), dpi: u32, text: Rc<Typography>) -> Result<Self> {
         unsafe {
             let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-            let properties = D2D1_RENDER_TARGET_PROPERTIES {
-                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_UNKNOWN,
-                    alphaMode: D2D1_ALPHA_MODE_UNKNOWN,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                usage: D2D1_RENDER_TARGET_USAGE_NONE,
-                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-            };
-            let window = D2D1_HWND_RENDER_TARGET_PROPERTIES {
-                hwnd,
-                pixelSize: D2D_SIZE_U {
-                    width: size.0.max(1),
-                    height: size.1.max(1),
-                },
-                presentOptions: D2D1_PRESENT_OPTIONS_NONE,
-            };
-            let target = factory.CreateHwndRenderTarget(&properties, &window)?;
-            target.SetDpi(dpi as f32, dpi as f32);
-            let painter = Painter::new(&factory, target.cast()?, text)?;
-            Ok(Self { target, painter })
-        }
-    }
-
-    pub fn resize(&self, size: (u32, u32)) -> Result<()> {
-        unsafe {
-            self.target.Resize(&D2D_SIZE_U {
-                width: size.0.max(1),
-                height: size.1.max(1),
+            let surface = Surface::new(size.0, size.1)?;
+            let target = make_target(&factory, &surface, dpi)?;
+            let painter = Painter::new(&factory, target.cast()?, text.clone())?;
+            Ok(Self {
+                factory,
+                surface,
+                target,
+                painter,
+                text,
+                dpi,
             })
         }
     }
 
-    pub fn set_dpi(&self, dpi: u32) {
-        unsafe {
-            self.target.SetDpi(dpi as f32, dpi as f32);
+    /// Makes the surface fit a window of `size` pixels at `dpi`.
+    pub fn resize(&mut self, size: (i32, i32), dpi: u32) -> Result<()> {
+        if self.surface.size == (size.0.max(1), size.1.max(1)) && self.dpi == dpi {
+            return Ok(());
         }
+        let surface = Surface::new(size.0, size.1)?;
+        let target = make_target(&self.factory, &surface, dpi)?;
+        self.painter = Painter::new(&self.factory, target.cast()?, self.text.clone())?;
+        self.target = target;
+        self.surface = surface;
+        self.dpi = dpi;
+        Ok(())
     }
 
-    /// Draws the window. An error with `D2DERR_RECREATE_TARGET` means the
-    /// surface was lost and a new renderer is needed.
-    pub fn draw(&mut self, scene: &Scene, mode: Mode, scroll: f32) -> Result<()> {
+    /// Draws the window and hands it to `hwnd`, with `opacity` from 0 to 255.
+    pub fn draw(
+        &mut self,
+        hwnd: HWND,
+        scene: &Scene,
+        mode: Mode,
+        scroll: f32,
+        opacity: u8,
+    ) -> Result<()> {
         self.painter.set_mode(mode);
         let painter = &self.painter;
         painter.begin();
-        painter.clear(Role::Win);
-        painter.draw_shapes(&scene.title, (0.0, 0.0));
-        painter.clip(Rect::new(
-            crate::scene::BORDER,
-            scene.content_top,
-            scene.width - 2.0 * crate::scene::BORDER,
-            scene.view_height,
-        ));
-        painter.draw_shapes(
-            &scene.content,
-            (crate::scene::BORDER, scene.content_top - scroll),
-        );
-        painter.unclip();
-        // The frame line goes on top, rounded like the window.
+        painter.clear_transparent();
+        // The window itself: a rounded plate, so the corners stay clear.
         painter.draw_shapes(
             &[Shape::Rect {
                 rect: Rect::new(0.0, 0.0, scene.width, scene.height),
-                radius: 8.0,
-                fill: None,
-                border: Some((Role::WinBorder, crate::scene::BORDER)),
+                radius: WINDOW_RADIUS,
+                fill: Some(Role::Win),
+                border: None,
             }],
             (0.0, 0.0),
         );
-        painter.end()
+        painter.draw_shapes(&scene.title, (0.0, 0.0));
+        painter.clip(Rect::new(
+            BORDER,
+            scene.content_top,
+            scene.width - 2.0 * BORDER,
+            scene.view_height,
+        ));
+        painter.draw_shapes(&scene.content, (BORDER, scene.content_top - scroll));
+        painter.unclip();
+        // The frame line goes on top.
+        painter.draw_shapes(
+            &[Shape::Rect {
+                rect: Rect::new(0.0, 0.0, scene.width, scene.height),
+                radius: WINDOW_RADIUS,
+                fill: None,
+                border: Some((Role::WinBorder, BORDER)),
+            }],
+            (0.0, 0.0),
+        );
+        painter.end()?;
+        unsafe {
+            let _ = GdiFlush();
+            let size = SIZE {
+                cx: self.surface.size.0,
+                cy: self.surface.size.1,
+            };
+            let from = POINT { x: 0, y: 0 };
+            let blend = BLENDFUNCTION {
+                BlendOp: AC_SRC_OVER as u8,
+                BlendFlags: 0,
+                SourceConstantAlpha: opacity,
+                AlphaFormat: AC_SRC_ALPHA as u8,
+            };
+            UpdateLayeredWindow(
+                hwnd,
+                None,
+                None,
+                Some(&size),
+                Some(self.surface.hdc),
+                Some(&from),
+                COLORREF(0),
+                Some(&blend),
+                ULW_ALPHA,
+            )
+        }
     }
 }

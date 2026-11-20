@@ -7,6 +7,7 @@ mod gfx;
 mod instance;
 mod popup;
 mod registry;
+mod surface;
 mod text;
 mod tray;
 mod util;

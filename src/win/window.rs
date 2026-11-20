@@ -6,15 +6,13 @@ use std::sync::OnceLock;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmExtendFrameIntoClientArea,
-    DwmSetWindowAttribute,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
     MonitorFromPoint,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -345,13 +343,6 @@ fn decorate(hwnd: HWND) {
             &preference as *const _ as *const _,
             size_of_val(&preference) as u32,
         );
-        let margins = MARGINS {
-            cxLeftWidth: 1,
-            cxRightWidth: 1,
-            cyTopHeight: 1,
-            cyBottomHeight: 1,
-        };
-        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
     }
 }
 
@@ -394,7 +385,6 @@ pub fn run() {
     {
         let mut app = app.borrow_mut();
         app.attach_fetcher(fetcher, results);
-        app.apply_opacity();
         decorate(hwnd);
         app.place_initial(saved, &monitors(), primary);
         unsafe {
@@ -408,13 +398,16 @@ pub fn run() {
         }
         app.add_tray_icon();
         app.start_due_fetch();
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+        }
+        // Per-pixel alpha windows show nothing until they are drawn.
+        app.rebuild_scene();
     }
     unsafe {
         // From here on the window procedure reaches the app.
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(app) as isize);
         SetTimer(Some(hwnd), TIMER_ID, TICK_MS, None);
-        let _ = ShowWindow(hwnd, SW_SHOW);
-
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&message);

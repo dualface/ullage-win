@@ -12,18 +12,17 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory, ID2D1Factory,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    BeginPaint, EndPaint, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromWindow, PAINTSTRUCT,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, UnregisterHotKey};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DestroyIcon, DestroyWindow, GWL_EXSTYLE, GetClientRect, GetCursorPos, GetWindowLongPtrW,
-    GetWindowRect, HICON, HWND_NOTOPMOST, HWND_TOPMOST, IsWindowVisible, LWA_ALPHA,
-    PostQuitMessage, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WS_EX_TRANSPARENT,
+    DestroyIcon, DestroyWindow, GWL_EXSTYLE, GetCursorPos, GetWindowLongPtrW, GetWindowRect, HICON,
+    HWND_NOTOPMOST, HWND_TOPMOST, IsWindowVisible, PostQuitMessage, SW_HIDE, SW_SHOW,
+    SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, WS_EX_TRANSPARENT,
 };
 use windows::core::w;
 
@@ -213,7 +212,7 @@ impl App {
         self.scene = scene;
         self.scroll = self.scroll.clamp(0.0, self.scene.max_scroll());
         self.fit_window();
-        self.invalidate();
+        self.redraw();
     }
 
     /// Gives the window the size of the scene, moving it only as far as
@@ -236,8 +235,9 @@ impl App {
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
         }
-        if let Some(renderer) = &self.renderer {
-            let _ = renderer.resize((width as u32, height as u32));
+        let dpi = self.dpi;
+        if let Some(renderer) = &mut self.renderer {
+            let _ = renderer.resize((width, height), dpi);
         }
     }
 
@@ -266,9 +266,24 @@ impl App {
         }
     }
 
-    pub fn invalidate(&self) {
-        unsafe {
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
+    /// Draws the window again. A window with per-pixel alpha gets no
+    /// `WM_PAINT`, so every change of what it shows ends here.
+    pub fn redraw(&mut self) {
+        if !self.visible() {
+            return;
+        }
+        if self.renderer.is_none() {
+            let (width, height) = self.window_size_px();
+            self.renderer = Renderer::new((width, height), self.dpi, self.text.clone()).ok();
+        }
+        let opacity = (self.prefs.opacity * 255 / 100) as u8;
+        if let Some(renderer) = &mut self.renderer
+            && renderer
+                .draw(self.hwnd, &self.scene, self.mode, self.scroll, opacity)
+                .is_err()
+        {
+            // The surface is made again on the next draw.
+            self.renderer = None;
         }
     }
 
@@ -276,29 +291,9 @@ impl App {
         unsafe {
             let mut paint = PAINTSTRUCT::default();
             BeginPaint(self.hwnd, &mut paint);
-            if self.renderer.is_none() {
-                let mut client = RECT::default();
-                let _ = GetClientRect(self.hwnd, &mut client);
-                self.renderer = Renderer::new(
-                    self.hwnd,
-                    (
-                        (client.right - client.left).max(1) as u32,
-                        (client.bottom - client.top).max(1) as u32,
-                    ),
-                    self.dpi,
-                    self.text.clone(),
-                )
-                .ok();
-            }
-            if let Some(renderer) = &mut self.renderer
-                && renderer.draw(&self.scene, self.mode, self.scroll).is_err()
-            {
-                // The surface was lost; a new one is made on the next paint.
-                self.renderer = None;
-                self.invalidate();
-            }
             let _ = EndPaint(self.hwnd, &paint);
         }
+        self.redraw();
     }
 
     pub fn dpi_changed(&mut self, dpi: u32, suggested: RECT) {
@@ -313,9 +308,6 @@ impl App {
                 suggested.bottom - suggested.top,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
-        }
-        if let Some(renderer) = &self.renderer {
-            renderer.set_dpi(self.dpi);
         }
         self.rebuild_scene();
     }
@@ -371,7 +363,7 @@ impl App {
         let mode = registry::apps_mode();
         if mode != self.mode {
             self.mode = mode;
-            self.invalidate();
+            self.redraw();
         }
         if registry::system_mode() != self.tray_mode {
             self.update_tray_icon();
@@ -476,7 +468,7 @@ impl App {
             (self.scroll - notches * scene::SCROLL_STEP).clamp(0.0, self.scene.max_scroll());
         if scroll != self.scroll {
             self.scroll = scroll;
-            self.invalidate();
+            self.redraw();
         }
     }
 
@@ -577,8 +569,8 @@ impl App {
             }
             Command::SetOpacity(opacity) => {
                 self.prefs.opacity = opacity;
-                self.apply_opacity();
                 self.save_prefs();
+                self.redraw();
             }
             Command::Refresh => self.refresh_now(),
             Command::ToggleAutostart => {
@@ -622,13 +614,6 @@ impl App {
                 style & !flag
             };
             SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style);
-        }
-    }
-
-    pub fn apply_opacity(&self) {
-        let alpha = (self.prefs.opacity * 255 / 100) as u8;
-        unsafe {
-            let _ = SetLayeredWindowAttributes(self.hwnd, Default::default(), alpha, LWA_ALPHA);
         }
     }
 
