@@ -24,7 +24,7 @@ jobs:
           $manifest = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
           if (-not $manifest) { throw "No package version found in Cargo.toml" }
           $cargo = $manifest.Matches[0].Groups[1].Value
-          if ($version -ne $cargo) {
+          if ($version -cne $cargo) {
             throw "Tag version '$version' does not match Cargo.toml version '$cargo'"
           }
           "version=$version" >> $env:GITHUB_OUTPUT
