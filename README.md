@@ -23,6 +23,40 @@ drawn as a modern Windows window instead of a terminal screen.
   [ullage README](https://github.com/dualface/ullage-cli#readme)), then run
   `ullage daemon install` once.
 
+## Install
+
+1. Download `ullage-win-x86_64-setup.exe` from the build artifacts of the
+   `release` workflow (it also publishes `ullage-win-x86_64.zip`, which holds
+   only the program, and `checksums.txt` with the SHA-256 of both files).
+2. Run it. It installs for the current user only, to
+   `%LOCALAPPDATA%\Programs\Ullage Window`, and needs no administrator rights.
+   It adds a start menu shortcut named `Ullage Window` and no desktop shortcut.
+   The installer is not code-signed, so Windows SmartScreen may warn about it.
+3. On the last page, leave "Launch Ullage Window" ticked to start the app. A
+   silent install (`/VERYSILENT`) never starts it.
+
+The installer installs only this app. It does not install or start the ullage
+daemon; see Requirements.
+
+To start the app when you sign in, use either way:
+
+- Tick "Start Ullage Window when I sign in" in the installer. It is off by
+  default.
+- Turn on "start at sign-in" in the tray menu, at any time.
+
+Both write the same value, `Ullage Window` under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+
+Running the installer again upgrades in place: it asks a running copy to quit
+first.
+
+To uninstall, use Settings > Apps > Installed apps > Ullage Window, or run
+`unins000.exe` in the install folder. A running copy is asked to quit first.
+Uninstall removes the program files, the start menu shortcut and the `Ullage
+Window` Run value, whether or not it was set at install time. It keeps
+`%LOCALAPPDATA%\Ullage\window.json`: that folder is also the data folder of the
+`ullage` command.
+
 ## Build
 
 You need the stable Rust toolchain for the `x86_64-pc-windows-msvc` target and
@@ -89,6 +123,32 @@ cargo test
 
 The layout, the reading rules, the settings file and the refresh schedule do
 not depend on Windows, so the tests run on Linux too.
+
+## Package locally
+
+You need [Inno Setup 6](https://jrsoftware.org/isinfo.php) and a release build
+(see Build). From the repository root, in PowerShell:
+
+```text
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=0.1.0 packaging\windows\ullage-win.iss
+```
+
+This writes `ullage-win-x86_64-setup.exe` next to the script, in
+`packaging\windows`. Every default can be overridden with `/D`:
+
+| Switch | Default |
+| --- | --- |
+| `/DAppVersion=` | `0.0.0` |
+| `/DSourceExe=` | `..\..\target\release\ullage-win.exe` |
+| `/DLicenseFile=` | `..\..\LICENSE` |
+| `/DReadmeFile=` | `..\..\README.md` |
+| `/DOutputDir=` | `.` (the folder of the script) |
+
+The `release` workflow runs when a tag that starts with `v` is pushed. It
+requires the tag without the `v` to equal `version` in `Cargo.toml`, builds
+with `--locked`, passes that version as `/DAppVersion`, and uploads the
+installer, the zip and `checksums.txt` as build artifacts. The `ci` workflow
+runs the checks on every push and pull request.
 
 ## License
 
