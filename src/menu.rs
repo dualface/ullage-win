@@ -15,8 +15,9 @@ pub enum Command {
     SetTextSize(u32),
     SetOpacity(u32),
     SetConnection(Connection),
-    /// Reads `<ip>:<port> <code>` from the clipboard and pairs with it.
-    PairFromClipboard,
+    /// Asks for the address of a remote daemon and a pairing code, and pairs
+    /// with it.
+    Pair,
     /// Deletes the saved token and address of the remote daemon.
     ForgetRemote,
     Refresh,
@@ -62,7 +63,7 @@ impl Command {
                         .position(|c| *c == connection)
                         .unwrap_or(0)
             }
-            Command::PairFromClipboard => ID_PAIR,
+            Command::Pair => ID_PAIR,
             Command::ForgetRemote => ID_FORGET,
             Command::Quit => ID_QUIT,
             simple => 1 + ID_SIMPLE.iter().position(|c| *c == simple).unwrap_or(0),
@@ -73,7 +74,7 @@ impl Command {
         match id {
             1..=6 => Some(ID_SIMPLE[id - 1]),
             ID_QUIT => Some(Command::Quit),
-            ID_PAIR => Some(Command::PairFromClipboard),
+            ID_PAIR => Some(Command::Pair),
             ID_FORGET => Some(Command::ForgetRemote),
             ID_LAYOUT..=199 => LAYOUTS.get(id - ID_LAYOUT).map(|l| Command::SetLayout(*l)),
             ID_SIZE..=299 => TEXT_SIZES
@@ -167,11 +168,7 @@ fn connection_menu(state: &MenuState) -> Item {
                 enabled: state.remote_paired,
             },
             Item::Separator,
-            command(
-                Command::PairFromClipboard,
-                "Pair from clipboard\u{2026}",
-                false,
-            ),
+            command(Command::Pair, "Pair\u{2026}", false),
             Item::Command {
                 command: Command::ForgetRemote,
                 label: "Forget remote daemon".to_owned(),
@@ -440,7 +437,7 @@ mod tests {
                 "Local daemon",
                 "Remote daemon",
                 "-",
-                "Pair from clipboard\u{2026}",
+                "Pair\u{2026}",
                 "Forget remote daemon"
             ]
         );

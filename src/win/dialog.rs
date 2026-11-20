@@ -7,17 +7,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::util::{pcwstr, wide};
-use crate::remote::address::RemoteAddress;
-use crate::remote::pairing::PairCode;
 
 /// What the app asks the window procedure to show.
 pub enum Dialog {
     Notice(String),
-    /// Asks before a pairing code is sent to `address`.
-    ConfirmPair {
-        address: RemoteAddress,
-        code: PairCode,
-        text: String,
+    /// Asks for the address of a remote daemon and a pairing code. The box
+    /// for the address starts with `prefill`.
+    Pair {
+        prefill: Option<String>,
     },
 }
 

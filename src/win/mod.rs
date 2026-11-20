@@ -8,6 +8,7 @@ mod fetch;
 mod gfx;
 mod instance;
 mod pair;
+mod pair_dialog;
 mod popup;
 mod registry;
 mod surface;

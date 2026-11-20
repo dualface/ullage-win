@@ -36,13 +36,17 @@ use super::dialog;
 use super::fetch::{Fetcher, WM_FETCH_DONE};
 use super::instance::{self, Instance};
 use super::pair::{Pairer, WM_PAIR_DONE};
+use super::pair_dialog::{self, Refused};
 use super::popup;
 use super::text::Typography;
 use super::tray::{self, WM_TRAY};
 use super::util::{hiword, loword, pcwstr, wide, x_of, y_of};
 use crate::contract::{QUIT_MESSAGE, SHOW_MESSAGE, WINDOW_CLASS};
+use crate::pair_form::plaintext_question;
 use crate::placement::Edges;
 use crate::prefs::{Prefs, load, prefs_path};
+use crate::remote::address::RemoteAddress;
+use crate::remote::pairing::PairCode;
 use crate::scene::Spot;
 
 pub const HOTKEY_ID: i32 = 1;
@@ -298,22 +302,46 @@ fn open_menu(cell: &RefCell<App>, hwnd: HWND, anchor: popup::Anchor) {
     }
 }
 
-/// A message box runs its own message loop, so it is shown while the app is
-/// not borrowed. A pairing the user agrees to starts after it closes.
+/// A message box or a dialog runs its own message loop, so it is shown while
+/// the app is not borrowed. A pairing the user agrees to starts after it
+/// closes.
 fn show_dialog(cell: &RefCell<App>, hwnd: HWND, shown: dialog::Dialog) {
     match shown {
         dialog::Dialog::Notice(text) => dialog::notice(hwnd, &text),
-        dialog::Dialog::ConfirmPair {
-            address,
-            code,
-            text,
-        } => {
-            if dialog::confirm(hwnd, &text)
-                && let Ok(mut app) = cell.try_borrow_mut()
-            {
-                app.begin_pairing(address, code);
-            }
+        dialog::Dialog::Pair { prefill } => pair_from_dialog(cell, hwnd, prefill.as_deref()),
+    }
+}
+
+/// Asks for an address and a code, and starts the pairing they name.
+fn pair_from_dialog(cell: &RefCell<App>, hwnd: HWND, prefill: Option<&str>) {
+    let entry = match pair_dialog::run(hwnd, prefill) {
+        Ok(Some(entry)) => entry,
+        // Cancelled, or another pairing dialog is already open.
+        Ok(None) | Err(Refused::Busy) => return,
+        Err(Refused::Failed) => {
+            dialog::notice(hwnd, "The pairing dialog could not be shown.");
+            return;
         }
+    };
+    // The dialog took only a good address and a whole code. What it hands
+    // over is checked again, so that this does not depend on the dialog.
+    let (Ok(address), Some(code)) = (
+        RemoteAddress::parse(&entry.address),
+        PairCode::parse(&entry.code),
+    ) else {
+        dialog::notice(
+            hwnd,
+            "The address or the pairing code is not valid. No pairing was started.",
+        );
+        return;
+    };
+    if let Some(question) = plaintext_question(&address)
+        && !dialog::confirm(hwnd, &question)
+    {
+        return;
+    }
+    if let Ok(mut app) = cell.try_borrow_mut() {
+        app.begin_pairing(address, code);
     }
 }
 

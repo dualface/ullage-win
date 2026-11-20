@@ -82,8 +82,8 @@ pub enum FailureKind {
 /// The words for a failed fetch. `remote` is the address of the remote
 /// daemon, when that is the one that was asked.
 pub fn failure_for_kind(kind: &FailureKind, remote: Option<&RemoteAddress>) -> Failure {
-    let pair_here = "Run the command on the host that runs the daemon. Copy \"<ip>:<port> <code>\" \
-                     and choose Connection > Pair from clipboard.";
+    let pair_here = "Run the command on the host that runs the daemon. Then choose \
+                     Connection > Pair\u{2026} and enter its address and the code.";
     match (kind, remote) {
         (FailureKind::NotPaired, _) => Failure {
             title: "No remote daemon paired".into(),
@@ -407,7 +407,7 @@ mod tests {
         let not_paired = failure_for_kind(&FailureKind::NotPaired, Some(&address));
         assert_eq!(not_paired.title, "No remote daemon paired");
         assert_eq!(not_paired.command, "ullage device pair");
-        assert!(not_paired.body.contains("Pair from clipboard"));
+        assert!(not_paired.body.contains("Connection > Pair\u{2026}"));
         let rejected = failure_for_kind(&FailureKind::TokenRejected, Some(&address));
         assert_eq!(rejected.title, "Remote daemon rejected this device");
         assert_eq!(rejected.command, "ullage device pair");

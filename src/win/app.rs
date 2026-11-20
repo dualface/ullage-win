@@ -43,9 +43,7 @@ use crate::menu::{Command, MenuState};
 use crate::placement::{Edges, keep_inside, restore_position, to_px, window_size_px};
 use crate::prefs::{Connection, Prefs, save};
 use crate::remote::address::RemoteAddress;
-use crate::remote::pairing::{
-    self, ApplyError, ForgetError, PairCode, PairingEpoch, start_pairing,
-};
+use crate::remote::pairing::{self, ApplyError, ForgetError, PairCode, PairingEpoch};
 use crate::remote::store::{Credential, credential_for};
 use crate::scene::{self, Body, Input, Scene, Spot, Target, WORK_AREA_MARGIN};
 use crate::state::{Schedule, State, countdown};
@@ -640,7 +638,7 @@ impl App {
                 self.redraw();
             }
             Command::SetConnection(connection) => dialog = self.set_connection(connection),
-            Command::PairFromClipboard => dialog = self.pair_from_clipboard(),
+            Command::Pair => dialog = self.pair(),
             Command::ForgetRemote => dialog = self.forget_remote(),
             Command::Refresh => self.refresh_now(),
             Command::ToggleAutostart => {
@@ -676,8 +674,7 @@ impl App {
         }
         if connection == Connection::Remote && !self.remote_paired() {
             return Some(Dialog::Notice(
-                "This device is not paired with a remote daemon. Choose Pair from clipboard."
-                    .into(),
+                "This device is not paired with a remote daemon. Choose Pair\u{2026}.".into(),
             ));
         }
         let mut next = self.prefs.clone();
@@ -692,34 +689,23 @@ impl App {
         None
     }
 
-    /// Reads `<ip>:<port> <code>` from the clipboard. What it holds is not
-    /// trusted: a bad text says so and sends nothing, and a good one is shown
-    /// to the user, with the address, before the code goes anywhere.
-    fn pair_from_clipboard(&mut self) -> Option<Dialog> {
-        let text = clipboard::get_text(self.hwnd).unwrap_or_default();
-        match start_pairing(&text, self.prefs_path.is_some()) {
-            Err(refusal) => Some(Dialog::Notice(refusal.to_string())),
-            Ok((address, code)) => {
-                let plaintext = if address.is_encrypted_path() {
-                    ""
-                } else {
-                    "\n\nThis address is not on Tailscale: the code and the device token \
-                     cross the network as plain text. (plaintext)"
-                };
-                let text = format!(
-                    "Pair this device with the ullage daemon at {address}?\n\n\
-                     The pairing code is sent to that address.{plaintext}"
-                );
-                Some(Dialog::ConfirmPair {
-                    address,
-                    code,
-                    text,
-                })
-            }
+    /// Opens the pairing dialog, with the address of the settings in it. A
+    /// pairing is kept in the settings, so without a place to save them none
+    /// is started: it would still use up the code and register this device at
+    /// the daemon.
+    fn pair(&mut self) -> Option<Dialog> {
+        if self.prefs_path.is_none() {
+            return Some(Dialog::Notice(
+                "There is no place to save the settings, so no pairing was started.".into(),
+            ));
         }
+        Some(Dialog::Pair {
+            prefill: self.prefs.remote_address.as_ref().map(ToString::to_string),
+        })
     }
 
-    /// The user agreed to the pairing: ask the daemon, on a thread.
+    /// The user typed an address and a code and agreed: ask the daemon, on a
+    /// thread.
     pub fn begin_pairing(&mut self, address: RemoteAddress, code: PairCode) {
         let epoch = self.pairing.begin();
         if let Some(pairer) = &self.pairer {
@@ -770,7 +756,7 @@ impl App {
                         Err(ApplyError::Rollback) => format!(
                             "Pairing with {address} worked, but the settings could not be \
                              saved, and an earlier pairing could not be put back. Pair again \
-                             with Pair from clipboard."
+                             with Pair\u{2026}."
                         ),
                     }
                 }
@@ -801,7 +787,7 @@ impl App {
             Err(ForgetError::Settings) => "The settings could not be saved. Nothing was changed.",
             Err(ForgetError::Rollback) => {
                 "The settings could not be saved, and the device token could not be put back. \
-                 Pair again with Pair from clipboard."
+                 Pair again with Pair\u{2026}."
             }
         };
         Some(Dialog::Notice(notice.into()))

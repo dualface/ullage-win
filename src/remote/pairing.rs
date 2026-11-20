@@ -1,9 +1,10 @@
 //! Pairing this device with a daemon.
 //!
-//! The user runs `ullage device pair` on the daemon's host, and copies
-//! `<ip>:<port> <code>` to the clipboard. This module reads that text, asks
-//! the daemon for a device token, and keeps the token and the address
-//! together, so that they never get out of step.
+//! The user runs `ullage device pair` on the daemon's host, and types the
+//! address of the daemon and the pairing code into the pairing dialog. This
+//! module checks what was typed, asks the daemon for a device token, and
+//! keeps the token and the address together, so that they never get out of
+//! step.
 
 use std::fmt;
 use std::net::Ipv4Addr;
@@ -11,7 +12,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::address::{AddressError, RemoteAddress};
+use super::address::RemoteAddress;
 use super::http::{self, Deadline, HttpError, Request};
 use super::resolve::{ResolveError, Resolver, SystemResolver, resolve};
 use super::store::{Credential, StoreError, Token, TokenStore};
@@ -19,99 +20,60 @@ use super::store::{Credential, StoreError, Token, TokenStore};
 /// The longest a pairing request may take. A fetch has its own limit.
 pub const PAIR_TIMEOUT: Duration = Duration::from_secs(15);
 
-const CODE_MAX_LEN: usize = 16;
+/// The daemon builds its pairing codes from these characters: no `0`, `1`,
+/// `I`, `L`, `O` or `U`, which are easy to mix up.
+pub const CODE_ALPHABET: &str = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// The daemon refuses a longer device name.
 const DEVICE_NAME_MAX_LEN: usize = 64;
 const FALLBACK_DEVICE_NAME: &str = "ullage-win";
 
-/// The code `ullage device pair` printed: letters, digits and a hyphen.
+/// The code `ullage device pair` printed, in the one form this app takes:
+/// `XXX-XXX`, six characters of [`CODE_ALPHABET`] in capitals.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PairCode(String);
 
 impl PairCode {
-    fn parse(text: &str) -> Option<Self> {
-        let valid = !text.is_empty()
-            && text.len() <= CODE_MAX_LEN
-            && text
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    pub fn parse(text: &str) -> Option<Self> {
+        let valid = text.len() == 7
+            && text.bytes().enumerate().all(|(index, byte)| match index {
+                3 => byte == b'-',
+                _ => CODE_ALPHABET.as_bytes().contains(&byte),
+            });
         valid.then(|| Self(text.to_owned()))
     }
+}
+
+/// What the code box of the pairing dialog holds after an edit: capitals
+/// only, nothing that is not in [`CODE_ALPHABET`], at most six characters,
+/// and a hyphen after the third. Applying it to its own result changes
+/// nothing, so the hyphen the dialog adds can be taken away again with the
+/// backspace key.
+pub fn format_pair_code_input(raw: &str) -> String {
+    let mut formatted = String::with_capacity(7);
+    let kept = raw
+        .chars()
+        .map(|c| c.to_ascii_uppercase())
+        .filter(|c| CODE_ALPHABET.contains(*c))
+        .take(6);
+    for (index, c) in kept.enumerate() {
+        if index == 3 {
+            formatted.push('-');
+        }
+        formatted.push(c);
+    }
+    formatted
+}
+
+/// Whether the dialog may take what was typed: an address that
+/// `RemoteAddress::parse` takes, and a code of exactly the form `XXX-XXX`.
+pub fn can_submit(address_text: &str, code_text: &str) -> bool {
+    RemoteAddress::parse(address_text).is_ok() && PairCode::parse(code_text).is_some()
 }
 
 /// A code is a secret for five minutes: it never prints.
 impl fmt::Debug for PairCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("PairCode(<redacted>)")
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClipboardError {
-    /// Not two parts separated by white space.
-    Format,
-    Address(AddressError),
-    Code,
-}
-
-impl fmt::Display for ClipboardError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ClipboardError::Format => {
-                f.write_str("The clipboard does not hold \"<ip>:<port> <pairing code>\".")
-            }
-            ClipboardError::Address(error) => write!(f, "The address is refused: {error}."),
-            ClipboardError::Code => f.write_str(
-                "The pairing code may hold only letters, digits and hyphens, up to 16 characters.",
-            ),
-        }
-    }
-}
-
-/// Reads `<ip>:<port> <code>` from the clipboard's text.
-pub fn parse_clipboard(text: &str) -> Result<(RemoteAddress, PairCode), ClipboardError> {
-    let mut parts = text.split_whitespace();
-    let (Some(address), Some(code), None) = (parts.next(), parts.next(), parts.next()) else {
-        return Err(ClipboardError::Format);
-    };
-    let address = RemoteAddress::parse(address).map_err(ClipboardError::Address)?;
-    let code = PairCode::parse(code).ok_or(ClipboardError::Code)?;
-    Ok((address, code))
-}
-
-/// Why a pairing is not started from what is on the clipboard.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Refusal {
-    Clipboard(ClipboardError),
-    /// The clipboard is fine, but there is no place to save the settings, so
-    /// the pairing could not be kept: it would still use up the code and
-    /// register this device at the daemon.
-    NoSettings,
-}
-
-impl fmt::Display for Refusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Refusal::Clipboard(error) => error.fmt(f),
-            Refusal::NoSettings => {
-                f.write_str("There is no place to save the settings, so no pairing was started.")
-            }
-        }
-    }
-}
-
-/// What may be paired with. The clipboard is read first, so that its error is
-/// the one the user sees; a good clipboard is then refused when the pairing
-/// could not be kept.
-pub fn start_pairing(
-    clipboard: &str,
-    can_save_settings: bool,
-) -> Result<(RemoteAddress, PairCode), Refusal> {
-    let (address, code) = parse_clipboard(clipboard).map_err(Refusal::Clipboard)?;
-    if can_save_settings {
-        Ok((address, code))
-    } else {
-        Err(Refusal::NoSettings)
     }
 }
 
@@ -361,64 +323,116 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_clipboard_holds_an_address_and_a_code() {
-        let (parsed, code) = parse_clipboard("100.71.140.68:7878 ABC-DEF").unwrap();
-        assert_eq!(parsed, address());
-        assert_eq!(code.0, "ABC-DEF");
-        assert!(parse_clipboard("  100.71.140.68:7878 \t abcdef\r\n").is_ok());
-        assert!(parse_clipboard("100.71.140.68:7878 ABCDEF").is_ok());
+    fn code(text: &str) -> PairCode {
+        PairCode::parse(text).unwrap()
     }
 
     #[test]
-    fn anything_else_on_the_clipboard_is_refused() {
+    fn a_code_is_three_characters_a_hyphen_and_three_characters() {
+        assert_eq!(code("ABC-DEF").0, "ABC-DEF");
+        assert!(PairCode::parse("234-XYZ").is_some());
+        assert!(PairCode::parse("HJK-MNP").is_some());
+    }
+
+    #[test]
+    fn any_other_form_of_a_code_is_refused() {
         for text in [
             "",
-            "100.71.140.68:7878",
-            "ABC-DEF",
-            "a b c",
-            "1.2.3.4:5 X Y",
+            "ABC",
+            "ABCDEF",
+            "abc-def",
+            "Abc-DEF",
+            "ABC-DE",
+            "ABC-DEFG",
+            "ABCD-EF",
+            "AB-CDEF",
+            "ABC DEF",
+            "ABC_DEF",
+            "ABC--DE",
+            "-ABCDEF",
+            "ABCDEF-",
+            " ABC-DEF",
+            "ABC-DEF ",
+            "ABC-DEF\n",
+            "ABC-DE\u{0}",
+            // Characters the daemon never uses.
+            "0BC-DEF",
+            "1BC-DEF",
+            "IBC-DEF",
+            "LBC-DEF",
+            "OBC-DEF",
+            "UBC-DEF",
+            "ABC-DE!",
+            "ÄBC-DEF",
+            // Seven bytes, but not seven characters.
+            "ABC-D\u{c4}",
         ] {
-            assert!(parse_clipboard(text).is_err(), "{text:?}");
-        }
-        assert_eq!(
-            parse_clipboard("100.71.140.68:7878 AB CD"),
-            Err(ClipboardError::Format)
-        );
-        assert_eq!(
-            parse_clipboard("8.8.8.8:7878 ABC-DEF"),
-            Err(ClipboardError::Address(AddressError::NotAllowed))
-        );
-        assert_eq!(
-            parse_clipboard("under_score:7878 ABC-DEF"),
-            Err(ClipboardError::Address(AddressError::BadHost))
-        );
-        assert!(parse_clipboard("center:7878 ABC-DEF").is_ok());
-        for code in ["AB!CD", "AB\u{0}CD", "ÄBC", &"A".repeat(17)] {
-            assert_eq!(
-                parse_clipboard(&format!("100.71.140.68:7878 {code}")),
-                Err(ClipboardError::Code),
-                "{code:?}"
-            );
-        }
-        assert!(parse_clipboard(&format!("100.71.140.68:7878 {}", "A".repeat(16))).is_ok());
-    }
-
-    #[test]
-    fn a_bad_clipboard_is_told_before_the_missing_settings() {
-        for text in ["", "100.71.140.68:7878", "8.8.8.8:7878 ABC-DEF"] {
-            let refused = start_pairing(text, false).unwrap_err();
-            assert!(matches!(refused, Refusal::Clipboard(_)), "{text:?}");
-            assert_eq!(refused, start_pairing(text, true).unwrap_err());
+            assert!(PairCode::parse(text).is_none(), "{text:?}");
         }
     }
 
     #[test]
-    fn a_good_clipboard_starts_a_pairing_only_with_a_place_for_the_settings() {
-        let text = "100.71.140.68:7878 ABC-DEF";
-        assert_eq!(start_pairing(text, false).unwrap_err(), Refusal::NoSettings);
-        let (address, _) = start_pairing(text, true).unwrap();
-        assert_eq!(address, self::address());
+    fn the_input_of_the_code_box_is_made_into_the_form_of_a_code() {
+        for (raw, formatted) in [
+            ("", ""),
+            ("a", "A"),
+            ("abc", "ABC"),
+            ("abcd", "ABC-D"),
+            ("abcdef", "ABC-DEF"),
+            ("abc-def", "ABC-DEF"),
+            ("a0b1c2", "ABC-2"),
+            ("ABCDEFGH", "ABC-DEF"),
+            (" abc-def\r\n", "ABC-DEF"),
+            ("a b c d e f", "ABC-DEF"),
+            ("ßabc", "ABC"),
+            ("ä!?-", ""),
+            ("0101OILU", ""),
+            ("ABC-", "ABC"),
+            ("-", ""),
+        ] {
+            assert_eq!(format_pair_code_input(raw), formatted, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn the_form_of_the_input_does_not_change_when_it_is_formatted_again() {
+        for raw in [
+            "abc",
+            "abcdef",
+            "a-b-c-d-e-f",
+            "ABC-",
+            "x",
+            "ZZZZZZZZ",
+            "2-3-4",
+        ] {
+            let once = format_pair_code_input(raw);
+            assert_eq!(format_pair_code_input(&once), once, "{raw:?}");
+            assert!(once.len() <= 7, "{raw:?}");
+        }
+        // A whole code, however it is typed, is a code.
+        assert!(PairCode::parse(&format_pair_code_input("abcdef")).is_some());
+        assert!(PairCode::parse(&format_pair_code_input("abc-def")).is_some());
+        assert!(PairCode::parse(&format_pair_code_input("abcde")).is_none());
+    }
+
+    #[test]
+    fn the_dialog_takes_a_good_address_with_a_whole_code_and_nothing_else() {
+        assert!(can_submit("100.71.140.68:7878", "ABC-DEF"));
+        assert!(can_submit("center:7878", "234-XYZ"));
+        for (address, code) in [
+            ("", "ABC-DEF"),
+            ("center", "ABC-DEF"),
+            ("8.8.8.8:7878", "ABC-DEF"),
+            ("center:0", "ABC-DEF"),
+            ("under_score:1", "ABC-DEF"),
+            ("center:7878", ""),
+            ("center:7878", "ABC-DE"),
+            ("center:7878", "abc-def"),
+            ("center:7878", "ABCDEF"),
+            ("", ""),
+        ] {
+            assert!(!can_submit(address, code), "{address:?} {code:?}");
+        }
     }
 
     #[test]
@@ -430,7 +444,7 @@ mod tests {
             reply("500 Internal Server Error", &[], b"{}"),
         ] {
             let server = serve(vec![Reply::Raw(reply)]);
-            let (_, code) = parse_clipboard(&format!("{} ABC-DEF", server.address)).unwrap();
+            let code = code("ABC-DEF");
             let late = Deadline::late_after(Duration::from_secs(5));
             assert_eq!(
                 pair_by(&server.address, &code, "FLY", late),
@@ -461,7 +475,7 @@ mod tests {
 
     #[test]
     fn a_code_never_prints() {
-        let (_, code) = parse_clipboard("100.71.140.68:7878 ABC-DEF").unwrap();
+        let code = code("ABC-DEF");
         assert!(!format!("{code:?}").contains("ABC"));
         for error in [
             PairError::Unreachable,
@@ -555,7 +569,7 @@ mod tests {
         let server = serve(vec![Reply::Raw(super::super::testserver::ok(
             body.as_bytes(),
         ))]);
-        let (_, code) = parse_clipboard(&format!("{} ABC-DEF", server.address)).unwrap();
+        let code = code("ABC-DEF");
         let taken = pair(&server.address, &code, "FLY").unwrap();
         assert_eq!(taken.expose(), token);
         let seen = server.finish();
@@ -573,7 +587,7 @@ mod tests {
 
     fn pair_with(raw: Vec<u8>) -> Result<Token, PairError> {
         let server = serve(vec![Reply::Raw(raw)]);
-        let (_, code) = parse_clipboard(&format!("{} ABC-DEF", server.address)).unwrap();
+        let code = code("ABC-DEF");
         pair(&server.address, &code, "FLY")
     }
 
@@ -609,7 +623,7 @@ mod tests {
             drop(listener);
             gone.unwrap()
         };
-        let (_, code) = parse_clipboard(&format!("{gone} ABC-DEF")).unwrap();
+        let code = code("ABC-DEF");
         assert_eq!(pair(&gone, &code, "FLY"), Err(PairError::Unreachable));
     }
 

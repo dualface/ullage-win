@@ -8,6 +8,7 @@ mod contract;
 mod display;
 mod icons;
 mod menu;
+mod pair_form;
 mod placement;
 mod prefs;
 mod remote;
