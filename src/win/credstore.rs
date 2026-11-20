@@ -113,7 +113,12 @@ mod tests {
         }
     }
 
+    // The Credential Manager is not there in a logon session that has no
+    // desktop: over SSH every call fails with "A specified logon session does
+    // not exist". Run it in a terminal on the desktop of the user:
+    // `cargo test credstore -- --ignored`.
     #[test]
+    #[ignore = "needs a logon session with a desktop; run with --ignored in a terminal there"]
     fn a_credential_is_written_read_replaced_and_deleted() {
         delete_at(TEST_TARGET).unwrap();
         assert_eq!(load_at(TEST_TARGET), Ok(None));
