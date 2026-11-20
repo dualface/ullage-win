@@ -83,8 +83,8 @@ pub struct Prefs {
     pub opacity: u32,
     #[serde(deserialize_with = "lenient_connection")]
     pub connection: Connection,
-    /// The remote daemon, as `<ip>:<port>`. The token is not here: it is in
-    /// the credential store.
+    /// The remote daemon, as `<host>:<port>`: the host is an IPv4 literal or
+    /// a host name. The token is not here: it is in the credential store.
     #[serde(
         deserialize_with = "lenient_address",
         skip_serializing_if = "Option::is_none"

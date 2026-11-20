@@ -155,10 +155,11 @@ Some points to know:
 - A host name is looked up again for every fetch and every pairing, so a
   daemon whose address changed is found without pairing again. Only a loopback,
   Tailscale (100.64.0.0/10) or private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
-  address may receive the token. When a name resolves to any other address, the
-  window sends nothing and says which address it got. A public address that you
-  write yourself is refused in the same way. The first eight answers of a name
-  are looked at, and tried in order.
+  address may receive the token. Of the IPv4 answers of a name, the first eight
+  are looked at, and those are the ones that are tried, in order. When one of
+  them is any other address, the window sends nothing and says which address
+  it got. An answer after the eighth is not looked at and not connected to. A
+  public address that you write yourself is refused in the same way.
 - The device token belongs to the text of the address that was paired
   (a name is kept in lower case). Pairing with `center:7878` does not carry over
   to `100.71.140.68:7878`, nor to another name of the same host: pair again.

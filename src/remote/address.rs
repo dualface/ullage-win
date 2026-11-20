@@ -2,9 +2,10 @@
 //!
 //! The host part is an IPv4 literal or a host name. A literal must be on a
 //! network the user's own devices share: loopback, Tailscale or a private
-//! range. A host name is resolved on every connection, and each address it
-//! resolves to must be in the same ranges (see `resolve`), so a DNS answer
-//! can never send the device token to the public internet.
+//! range. A host name is resolved on every connection, and each of the first
+//! eight IPv4 addresses it resolves to must be in the same ranges (see
+//! `resolve`), so a DNS answer can never send the device token to the public
+//! internet: an address that is not checked is not connected to either.
 
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddrV4};

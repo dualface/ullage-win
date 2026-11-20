@@ -2,9 +2,11 @@
 //!
 //! A literal stands for itself. A host name is resolved on every fetch and
 //! every pairing, so a daemon whose address changed is found again without
-//! pairing anew. Every address it resolves to must be one the device token
-//! may be sent to (`address::allowed`): an answer that points anywhere else
-//! is refused as a whole, and none of the others is tried instead.
+//! pairing anew. Only the IPv4 answers are used, and only the first eight of
+//! them: those are checked, and those are tried. Each of them must be one
+//! the device token may be sent to (`address::allowed`). When one is not, the
+//! answer is refused as a whole, and none of the others is tried instead. An
+//! answer after the eighth is neither checked nor connected to.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4, ToSocketAddrs};
@@ -67,7 +69,7 @@ fn lookup_in_thread(
     deadline: &Deadline,
     lookup: impl FnOnce() -> io::Result<Vec<IpAddr>> + Send + 'static,
 ) -> Result<Vec<IpAddr>, ResolveError> {
-    let wait = deadline.remaining().map_err(|_| ResolveError::Timeout)?;
+    deadline.remaining().map_err(|_| ResolveError::Timeout)?;
     let (sender, receiver) = mpsc::channel();
     thread::Builder::new()
         .name("resolve".into())
@@ -76,11 +78,17 @@ fn lookup_in_thread(
             let _ = sender.send(lookup());
         })
         .map_err(|_| ResolveError::LookupFailed)?;
-    match receiver.recv_timeout(wait) {
-        Ok(Ok(found)) => Ok(found),
-        Ok(Err(_)) => Err(ResolveError::LookupFailed),
-        Err(_) => Err(ResolveError::Timeout),
-    }
+    // What is left is read after the thread is made, so the time that took
+    // is not waited for on top of the deadline.
+    let wait = deadline.remaining().map_err(|_| ResolveError::Timeout)?;
+    let found = match receiver.recv_timeout(wait) {
+        Ok(Ok(found)) => found,
+        Ok(Err(_)) => return Err(ResolveError::LookupFailed),
+        Err(_) => return Err(ResolveError::Timeout),
+    };
+    // An answer that comes at the deadline is too late, like any other.
+    deadline.remaining().map_err(|_| ResolveError::Timeout)?;
+    Ok(found)
 }
 
 /// The addresses to connect to, in the order to try them.
