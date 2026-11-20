@@ -16,8 +16,8 @@ drawn as a modern Windows window instead of a terminal screen.
 
 ## Requirements
 
-- Windows 10 or 11 on x86-64. The window draws its own rounded corners and its
-  own shadow, so it looks the same on both.
+- Windows 10 or 11 on x86-64. The window draws its own rounded corners, so it
+  looks the same on both.
 - The ullage daemon, installed and running. This app does not install, start
   or stop it. Install ullage first (see the
   [ullage README](https://github.com/dualface/ullage-cli#readme)), then run

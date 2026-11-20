@@ -29,13 +29,11 @@ use super::surface::Surface;
 use super::text::Typography;
 use crate::icons::{Mark, Prim, marks};
 use crate::placement::surface_is_stale;
-use crate::scene::{BORDER, DotFill, Icon, Rect, SHADOW_MARGIN, Scene, Shape, Text};
+use crate::scene::{BORDER, DotFill, Icon, Rect, Scene, Shape, Text};
 use crate::svgpath::{Seg, parse};
 use crate::theme::{Color, Mode, Role};
 
 const WINDOW_RADIUS: f32 = 8.0;
-/// How far the shadow sits below the window.
-const SHADOW_DROP: f32 = 3.0;
 
 pub fn d2d_color(color: Color) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
@@ -574,27 +572,7 @@ impl Renderer {
         let painter = &self.painter;
         painter.begin();
         painter.clear_transparent();
-        let margin = (SHADOW_MARGIN, SHADOW_MARGIN);
-        // The shadow: rings of a faint black that add up towards the window,
-        // set a little lower than it.
-        let steps = SHADOW_MARGIN as i32;
-        for step in (1..=steps).rev() {
-            let grow = step as f32;
-            painter.draw_shapes(
-                &[Shape::Rect {
-                    rect: Rect::new(
-                        -grow,
-                        SHADOW_DROP - grow,
-                        scene.width + 2.0 * grow,
-                        scene.height + 2.0 * grow,
-                    ),
-                    radius: WINDOW_RADIUS + grow,
-                    fill: Some(Role::Shadow),
-                    border: None,
-                }],
-                margin,
-            );
-        }
+        let origin = (0.0, 0.0);
         // The window itself: a rounded plate, so the corners stay clear.
         painter.draw_shapes(
             &[Shape::Rect {
@@ -603,22 +581,16 @@ impl Renderer {
                 fill: Some(Role::Win),
                 border: None,
             }],
-            margin,
+            origin,
         );
-        painter.draw_shapes(&scene.title, margin);
+        painter.draw_shapes(&scene.title, origin);
         painter.clip(Rect::new(
-            SHADOW_MARGIN + BORDER,
-            SHADOW_MARGIN + scene.content_top,
+            BORDER,
+            scene.content_top,
             scene.width - 2.0 * BORDER,
             scene.view_height,
         ));
-        painter.draw_shapes(
-            &scene.content,
-            (
-                SHADOW_MARGIN + BORDER,
-                SHADOW_MARGIN + scene.content_top - scroll,
-            ),
-        );
+        painter.draw_shapes(&scene.content, (BORDER, scene.content_top - scroll));
         painter.unclip();
         // The frame line goes on top.
         painter.draw_shapes(
@@ -628,7 +600,7 @@ impl Renderer {
                 fill: None,
                 border: Some((Role::WinBorder, BORDER)),
             }],
-            margin,
+            origin,
         );
         painter.end()?;
         unsafe {

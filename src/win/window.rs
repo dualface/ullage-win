@@ -21,13 +21,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA, GetMessageW,
-    GetWindowLongPtrW, HTCAPTION, HTCLIENT, HTTRANSPARENT, IDC_ARROW, LoadCursorW, MSG,
-    RegisterClassExW, RegisterWindowMessageW, SW_SHOW, SetTimer, SetWindowLongPtrW, ShowWindow,
-    TranslateMessage, WM_CLOSE, WM_CONTEXTMENU, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION,
-    WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE,
-    WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-    WS_POPUP,
+    GetWindowLongPtrW, HTCAPTION, HTCLIENT, IDC_ARROW, LoadCursorW, MSG, RegisterClassExW,
+    RegisterWindowMessageW, SW_SHOW, SetTimer, SetWindowLongPtrW, ShowWindow, TranslateMessage,
+    WM_CLOSE, WM_CONTEXTMENU, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND,
+    WM_EXITSIZEMOVE, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCHITTEST, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::BOOL;
 use windows::core::{PCWSTR, w};
@@ -148,8 +147,6 @@ fn dispatch(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Reply {
             };
             let code = match app.hit_test(point) {
                 Spot::Drag => HTCAPTION,
-                // The margin of the shadow lets clicks through.
-                Spot::Outside => HTTRANSPARENT as u32,
                 Spot::Button(_) | Spot::Client => HTCLIENT,
             };
             Reply::Done(code as isize)
@@ -335,8 +332,8 @@ fn create_window(prefs: &Prefs, at: (i32, i32)) -> Option<HWND> {
     }
 }
 
-/// Rounded corners and a shadow, where Windows has them. Both are
-/// best-effort: a window without them is still correct.
+/// Rounded corners, where Windows has them. This is best-effort: a window
+/// without them is still correct.
 fn decorate(hwnd: HWND) {
     unsafe {
         let preference = DWMWCP_ROUND;

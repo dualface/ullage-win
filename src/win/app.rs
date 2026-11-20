@@ -35,9 +35,9 @@ use super::tray;
 use super::util::{pcwstr, wide};
 use crate::contract::GUIDE_URL;
 use crate::menu::{Command, MenuState};
-use crate::placement::{Edges, keep_inside, restore_position};
+use crate::placement::{Edges, keep_inside, restore_position, to_px, window_size_px};
 use crate::prefs::{Prefs, save};
-use crate::scene::{self, Body, Input, SHADOW_MARGIN, Scene, Spot, Target, WORK_AREA_MARGIN};
+use crate::scene::{self, Body, Input, Scene, Spot, Target, WORK_AREA_MARGIN};
 use crate::state::{Schedule, State, countdown};
 use crate::theme::Mode;
 
@@ -76,10 +76,6 @@ pub struct App {
 
 fn to_dip(pixels: i32, dpi: u32) -> f32 {
     pixels as f32 * 96.0 / dpi as f32
-}
-
-fn to_px(dip: f32, dpi: u32) -> i32 {
-    (dip * dpi as f32 / 96.0).ceil() as i32
 }
 
 impl App {
@@ -174,11 +170,7 @@ impl App {
     }
 
     pub fn window_size_px(&self) -> (i32, i32) {
-        // The window is the scene and the transparent margin of its shadow.
-        (
-            to_px(self.scene.width + 2.0 * SHADOW_MARGIN, self.dpi),
-            to_px(self.scene.height + 2.0 * SHADOW_MARGIN, self.dpi),
-        )
+        window_size_px((self.scene.width, self.scene.height), self.dpi)
     }
 
     /// Builds the scene from the current state and time, and resizes the
@@ -224,10 +216,7 @@ impl App {
         if rect.right - rect.left == width && rect.bottom - rect.top == height {
             return;
         }
-        // The shadow may reach past the work area; the window may not.
-        let margin = to_px(SHADOW_MARGIN, self.dpi);
-        let work = self.work_area().grown(margin);
-        let (x, y) = keep_inside(work, (rect.left, rect.top), (width, height));
+        let (x, y) = keep_inside(self.work_area(), (rect.left, rect.top), (width, height));
         unsafe {
             let _ = SetWindowPos(
                 self.hwnd,
@@ -250,8 +239,7 @@ impl App {
     pub fn place_initial(&mut self, saved: Option<(i32, i32)>, monitors: &[Edges], primary: Edges) {
         self.rebuild_scene();
         let size = self.window_size_px();
-        let margin = to_px(SHADOW_MARGIN, self.dpi);
-        let (x, y) = restore_position(saved, size, monitors, primary.grown(margin), self.dpi);
+        let (x, y) = restore_position(saved, size, monitors, primary, self.dpi);
         unsafe {
             let _ = SetWindowPos(
                 self.hwnd,
@@ -421,8 +409,8 @@ impl App {
     fn point_in_dips(&self, screen: POINT) -> (f32, f32) {
         let rect = self.window_rect();
         (
-            to_dip(screen.x - rect.left, self.dpi) - SHADOW_MARGIN,
-            to_dip(screen.y - rect.top, self.dpi) - SHADOW_MARGIN,
+            to_dip(screen.x - rect.left, self.dpi),
+            to_dip(screen.y - rect.top, self.dpi),
         )
     }
 
@@ -432,10 +420,7 @@ impl App {
     }
 
     fn client_dips(&self, x: i32, y: i32) -> (f32, f32) {
-        (
-            to_dip(x, self.dpi) - SHADOW_MARGIN,
-            to_dip(y, self.dpi) - SHADOW_MARGIN,
-        )
+        (to_dip(x, self.dpi), to_dip(y, self.dpi))
     }
 
     pub fn mouse_moved(&mut self, x: i32, y: i32) {
@@ -502,8 +487,8 @@ impl App {
                 let window = self.window_rect();
                 if let Some(rect) = rect {
                     return Reply::Menu(Anchor {
-                        x: window.left + to_px(SHADOW_MARGIN + rect.right(), self.dpi),
-                        y: window.top + to_px(SHADOW_MARGIN + rect.bottom(), self.dpi),
+                        x: window.left + to_px(rect.right(), self.dpi),
+                        y: window.top + to_px(rect.bottom(), self.dpi),
                         below_button: true,
                     });
                 }

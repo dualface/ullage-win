@@ -28,8 +28,6 @@ pub const WIDTH_COMPACT: f32 = 290.0;
 pub const WORK_AREA_MARGIN: f32 = 32.0;
 /// Lines a wheel notch scrolls, times the height of a line.
 pub const SCROLL_STEP: f32 = 72.0;
-/// Transparent space around the window that holds its shadow.
-pub const SHADOW_MARGIN: f32 = 12.0;
 
 /// The size all layout numbers are given for.
 const BASE_TEXT_SIZE: f32 = 13.0;
@@ -235,8 +233,6 @@ pub struct Scene {
 /// What a point of the window is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Spot {
-    /// Not on the window at all, as in the margin that holds its shadow.
-    Outside,
     Button(Target),
     /// Part of the window that moves it when pressed.
     Drag,
@@ -250,9 +246,6 @@ impl Scene {
     }
 
     pub fn spot(&self, x: f32, y: f32, scroll: f32) -> Spot {
-        if x < 0.0 || y < 0.0 || x >= self.width || y >= self.height {
-            return Spot::Outside;
-        }
         // Content shapes are inside the frame line.
         let (x, content_y) = (x - BORDER, y - self.content_top + scroll);
         let in_view = y >= self.content_top && y < self.content_top + self.view_height;
@@ -536,17 +529,6 @@ mod tests {
             scene.spot(700.0, scene.content_top + card.y + 5.0, 0.0),
             Spot::Drag
         );
-    }
-
-    #[test]
-    fn a_point_outside_the_window_is_outside() {
-        use super::cards::tests::sample_cards;
-        let cards = sample_cards(1);
-        let scene = build(&input(Layout::Columns, Body::Cards(&cards)), &FakeMeasure);
-        assert_eq!(scene.spot(-1.0, 10.0, 0.0), Spot::Outside);
-        assert_eq!(scene.spot(10.0, scene.height, 0.0), Spot::Outside);
-        assert_eq!(scene.spot(scene.width, 10.0, 0.0), Spot::Outside);
-        assert_ne!(scene.spot(0.0, 0.0, 0.0), Spot::Outside);
     }
 
     #[test]

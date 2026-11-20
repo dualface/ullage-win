@@ -11,16 +11,6 @@ pub struct Edges {
 }
 
 impl Edges {
-    /// This area made `by` pixels larger on every side.
-    pub fn grown(self, by: i32) -> Self {
-        Self {
-            left: self.left - by,
-            top: self.top - by,
-            right: self.right + by,
-            bottom: self.bottom + by,
-        }
-    }
-
     fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
     }
@@ -30,6 +20,17 @@ const DEFAULT_MARGIN_DIP: i32 = 16;
 
 fn scaled(dip: i32, dpi: u32) -> i32 {
     (i64::from(dip) * i64::from(dpi) / 96) as i32
+}
+
+/// The size of the window in pixels, for a scene `size` given in DIPs. Each
+/// side is rounded up, so the scene always fits.
+pub fn window_size_px(size: (f32, f32), dpi: u32) -> (i32, i32) {
+    (to_px(size.0, dpi), to_px(size.1, dpi))
+}
+
+/// DIPs as pixels at `dpi`, rounded up.
+pub fn to_px(dip: f32, dpi: u32) -> i32 {
+    (dip * dpi as f32 / 96.0).ceil() as i32
 }
 
 /// The top right of a work area, 16 DIPs from its right and top edges.
@@ -108,16 +109,15 @@ mod tests {
     };
 
     #[test]
-    fn an_area_grows_on_every_side() {
-        assert_eq!(
-            PRIMARY.grown(10),
-            Edges {
-                left: -10,
-                top: -10,
-                right: 1930,
-                bottom: 1050
-            }
-        );
+    fn the_window_is_as_large_as_the_scene() {
+        assert_eq!(window_size_px((800.0, 500.0), 96), (800, 500));
+        assert_eq!(window_size_px((800.0, 500.0), 144), (1200, 750));
+        assert_eq!(window_size_px((800.0, 500.0), 192), (1600, 1000));
+    }
+
+    #[test]
+    fn a_fractional_pixel_rounds_up() {
+        assert_eq!(window_size_px((290.5, 100.1), 96), (291, 101));
     }
 
     #[test]
