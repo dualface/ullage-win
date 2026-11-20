@@ -135,8 +135,9 @@ On this host:
    hyphen after the third character. A code that you paste in is made into the
    same form. `OK` can be pressed only when the address is taken and the code
    is complete, in the form `XXX-XXX`.
-4. Press `OK` (or Enter). When the address is not on Tailscale, the window first
-   asks whether to go on, because the code and the token then cross the network
+4. Press `OK` (or Enter). When the address is not known to be on Tailscale (a
+   host name is judged by its spelling, see below), the window first asks
+   whether to go on, because the code and the token may then cross the network
    as plain text (`(plaintext)`). Then the window pairs, saves the token, and
    starts to show that daemon. `Cancel` and Esc close the dialog and send
    nothing.

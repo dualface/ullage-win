@@ -6,7 +6,6 @@
 //! while the app is not borrowed, like a menu or a message box.
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -39,17 +38,9 @@ pub struct Entry {
     pub code: String,
 }
 
+/// Windows could not make the dialog.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Refused {
-    /// A pairing dialog is already open.
-    Busy,
-    /// Windows could not make the dialog.
-    Failed,
-}
-
-/// Only one pairing dialog at a time. The dialog disables the window, but
-/// the tray icon still reaches it, and so does a second `Pair…`.
-static OPEN: AtomicBool = AtomicBool::new(false);
+pub struct Failed;
 
 struct Shared {
     prefill: String,
@@ -63,16 +54,9 @@ struct Shared {
 
 /// Shows the dialog over `owner` and waits for it to close. `None` is a
 /// dialog that was cancelled. The boxes are emptied before the dialog goes.
-pub fn run(owner: HWND, prefill: Option<&str>) -> Result<Option<Entry>, Refused> {
-    if OPEN.swap(true, Ordering::SeqCst) {
-        return Err(Refused::Busy);
-    }
-    let result = show(owner, prefill);
-    OPEN.store(false, Ordering::SeqCst);
-    result
-}
-
-fn show(owner: HWND, prefill: Option<&str>) -> Result<Option<Entry>, Refused> {
+/// That only one dialog is open at a time is the caller's to see to: the
+/// dialog disables the window, but the tray icon still reaches it.
+pub fn run(owner: HWND, prefill: Option<&str>) -> Result<Option<Entry>, Failed> {
     // A template must start at a multiple of four bytes, which a `Vec<u8>`
     // does not promise.
     let bytes = template();
@@ -87,7 +71,7 @@ fn show(owner: HWND, prefill: Option<&str>) -> Result<Option<Entry>, Refused> {
         entry: RefCell::new(None),
     };
     let ended = unsafe {
-        let module = GetModuleHandleW(None).map_err(|_| Refused::Failed)?;
+        let module = GetModuleHandleW(None).map_err(|_| Failed)?;
         DialogBoxIndirectParamW(
             Some(module.into()),
             words.as_ptr().cast::<DLGTEMPLATE>(),
@@ -99,7 +83,7 @@ fn show(owner: HWND, prefill: Option<&str>) -> Result<Option<Entry>, Refused> {
     // `-1` is a dialog that could not be made. Anything else, `0` for a
     // cancel and `1` for OK, leaves the answer in `shared`.
     if ended == -1 {
-        return Err(Refused::Failed);
+        return Err(Failed);
     }
     Ok(shared.entry.into_inner())
 }
@@ -343,6 +327,15 @@ mod tests {
         (packed >> 16) as usize & 0xFFFF
     }
 
+    /// Pastes `text` from the clipboard into the box, as Ctrl+V does.
+    fn paste(hwnd: HWND, id: u16, text: &str) {
+        const WM_PASTE: u32 = 0x0302;
+        crate::win::clipboard::set_text(HWND::default(), text).unwrap();
+        unsafe {
+            SendDlgItemMessageW(hwnd, id.into(), WM_PASTE, WPARAM(0), LPARAM(0));
+        }
+    }
+
     fn click(hwnd: HWND, id: u16) {
         unsafe {
             PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(usize::from(id)), LPARAM(0)).unwrap();
@@ -351,8 +344,26 @@ mod tests {
 
     // The values are in `Send` form: a raw handle crosses threads, an `HWND`
     // does not.
+    /// Closes the dialog when the script ends, also when an assertion in it
+    /// failed: the thread that shows the dialog waits for it, and would
+    /// never report the failure.
+    struct CloseOnDrop(HWND);
+
+    impl Drop for CloseOnDrop {
+        fn drop(&mut self) {
+            // The dialog is gone already when the script closed it.
+            unsafe {
+                let _ = PostMessageW(Some(self.0), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+
     fn drive(script: impl FnOnce(HWND) + Send + 'static) -> thread::JoinHandle<()> {
-        thread::spawn(move || script(find_dialog()))
+        thread::spawn(move || {
+            let dialog = find_dialog();
+            let _close = CloseOnDrop(dialog);
+            script(dialog)
+        })
     }
 
     #[test]
@@ -377,6 +388,14 @@ mod tests {
             assert_eq!(text_of(dialog, ID_CODE), "ABC-2");
             set_text(dialog, ID_CODE, " abc-def\r\n");
             assert_eq!(text_of(dialog, ID_CODE), "ABC-DEF");
+            // A real paste, with a line break in front of the code and one
+            // inside it, which a single-line box would cut short.
+            for pasted in ["\r\nABC-DEF\r\n", "ABC\r\nDEF", "\r\n\r\nabcdef"] {
+                set_text(dialog, ID_CODE, "");
+                paste(dialog, ID_CODE, pasted);
+                assert_eq!(text_of(dialog, ID_CODE), "ABC-DEF", "{pasted:?}");
+            }
+            assert!(enabled(dialog, ID_OK));
             assert!(enabled(dialog, ID_OK));
             // An address that is not taken says why, and holds OK back.
             set_text(dialog, ID_ADDRESS, "8.8.8.8:80");
@@ -387,12 +406,12 @@ mod tests {
             assert!(!enabled(dialog, ID_OK));
             set_text(dialog, ID_ADDRESS, "Center:7878");
             assert!(enabled(dialog, ID_OK));
-            // A second dialog is not opened while this one is.
-            assert!(matches!(run(HWND::default(), None), Err(Refused::Busy)));
             click(dialog, ID_OK);
         });
-        let entry = run(HWND::default(), Some("center:7878")).unwrap().unwrap();
+        let shown = run(HWND::default(), Some("center:7878"));
+        // The failure of the script is the one to report.
         driver.join().unwrap();
+        let entry = shown.unwrap().unwrap();
         assert_eq!(entry.address, "Center:7878");
         assert_eq!(entry.code, "ABC-DEF");
     }
@@ -415,12 +434,13 @@ mod tests {
                 PostMessageW(Some(dialog), WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap();
             }
         });
-        let entry = run(HWND::default(), None).unwrap();
+        let shown = run(HWND::default(), None);
         driver.join().unwrap();
-        assert!(entry.is_none());
+        assert!(shown.unwrap().is_none());
         // The dialog is closed, so another may open.
         let driver = drive(|dialog| click(dialog, ID_CANCEL));
-        assert!(run(HWND::default(), None).unwrap().is_none());
+        let shown = run(HWND::default(), None);
         driver.join().unwrap();
+        assert!(shown.unwrap().is_none());
     }
 }

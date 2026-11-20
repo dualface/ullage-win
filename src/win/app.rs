@@ -87,6 +87,9 @@ pub struct App {
     pairs: Option<Receiver<PairResult>>,
     /// Which pairing may still be kept.
     pairing: PairingEpoch,
+    /// Whether the pairing dialog is open. It runs its own message loop, so
+    /// a second `Pair…` can come in while it is.
+    pair_dialog_open: bool,
     tray_icon: Option<HICON>,
     tray_mode: Mode,
 }
@@ -140,6 +143,7 @@ impl App {
             pairer: None,
             pairs: None,
             pairing: PairingEpoch::default(),
+            pair_dialog_open: false,
             tray_icon: None,
             tray_mode: registry::system_mode(),
         }
@@ -702,6 +706,15 @@ impl App {
         Some(Dialog::Pair {
             prefill: self.prefs.remote_address.as_ref().map(ToString::to_string),
         })
+    }
+
+    /// Takes the one place for the pairing dialog. `false` when it is taken.
+    pub fn open_pair_dialog(&mut self) -> bool {
+        !std::mem::replace(&mut self.pair_dialog_open, true)
+    }
+
+    pub fn close_pair_dialog(&mut self) {
+        self.pair_dialog_open = false;
     }
 
     /// The user typed an address and a code and agreed: ask the daemon, on a

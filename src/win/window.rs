@@ -36,7 +36,7 @@ use super::dialog;
 use super::fetch::{Fetcher, WM_FETCH_DONE};
 use super::instance::{self, Instance};
 use super::pair::{Pairer, WM_PAIR_DONE};
-use super::pair_dialog::{self, Refused};
+use super::pair_dialog;
 use super::popup;
 use super::text::Typography;
 use super::tray::{self, WM_TRAY};
@@ -314,11 +314,23 @@ fn show_dialog(cell: &RefCell<App>, hwnd: HWND, shown: dialog::Dialog) {
 
 /// Asks for an address and a code, and starts the pairing they name.
 fn pair_from_dialog(cell: &RefCell<App>, hwnd: HWND, prefill: Option<&str>) {
-    let entry = match pair_dialog::run(hwnd, prefill) {
+    // One dialog at a time: the dialog disables the window, but the tray
+    // icon still reaches it, and so does a second `Pair…`.
+    let free = cell
+        .try_borrow_mut()
+        .is_ok_and(|mut app| app.open_pair_dialog());
+    if !free {
+        return;
+    }
+    let shown = pair_dialog::run(hwnd, prefill);
+    if let Ok(mut app) = cell.try_borrow_mut() {
+        app.close_pair_dialog();
+    }
+    let entry = match shown {
         Ok(Some(entry)) => entry,
-        // Cancelled, or another pairing dialog is already open.
-        Ok(None) | Err(Refused::Busy) => return,
-        Err(Refused::Failed) => {
+        // Cancelled.
+        Ok(None) => return,
+        Err(pair_dialog::Failed) => {
             dialog::notice(hwnd, "The pairing dialog could not be shown.");
             return;
         }
