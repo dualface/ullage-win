@@ -328,6 +328,21 @@ mod tests {
         unsafe { IsWindowEnabled(item) }.as_bool()
     }
 
+    /// What the box takes at most, and where the caret is.
+    fn limit_of(hwnd: HWND, id: u16) -> usize {
+        const EM_GETLIMITTEXT: u32 = 0x00D5;
+        unsafe { SendDlgItemMessageW(hwnd, id.into(), EM_GETLIMITTEXT, WPARAM(0), LPARAM(0)) }.0
+            as usize
+    }
+
+    /// The end of the selection, which is the caret when nothing is selected.
+    fn caret_of(hwnd: HWND, id: u16) -> usize {
+        const EM_GETSEL: u32 = 0x00B0;
+        let packed =
+            unsafe { SendDlgItemMessageW(hwnd, id.into(), EM_GETSEL, WPARAM(0), LPARAM(0)) }.0;
+        (packed >> 16) as usize & 0xFFFF
+    }
+
     fn click(hwnd: HWND, id: u16) {
         unsafe {
             PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(usize::from(id)), LPARAM(0)).unwrap();
@@ -348,12 +363,16 @@ mod tests {
             assert_eq!(text_of(dialog, ID_ADDRESS), "center:7878");
             assert_eq!(text_of(dialog, ID_ADDRESS_NOTE), "");
             assert!(!enabled(dialog, ID_OK));
+            assert_eq!(limit_of(dialog, ID_ADDRESS), ADDRESS_LIMIT);
+            assert_eq!(limit_of(dialog, ID_CODE), CODE_LIMIT);
             // Typed and pasted codes are made into the form of a code.
             set_text(dialog, ID_CODE, "abc");
             assert_eq!(text_of(dialog, ID_CODE), "ABC");
             assert!(!enabled(dialog, ID_OK));
             set_text(dialog, ID_CODE, "abcd");
             assert_eq!(text_of(dialog, ID_CODE), "ABC-D");
+            // The caret is after the text that was written back.
+            assert_eq!(caret_of(dialog, ID_CODE), 5);
             set_text(dialog, ID_CODE, "a0b1c2");
             assert_eq!(text_of(dialog, ID_CODE), "ABC-2");
             set_text(dialog, ID_CODE, " abc-def\r\n");
