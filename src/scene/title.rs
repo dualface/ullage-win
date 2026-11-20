@@ -96,9 +96,11 @@ pub fn build(input: &Input, width: f32, strip: bool, measure: &dyn Measure) -> T
     // Buttons, from the right edge inwards.
     let (button_w, button_h) = metrics.button;
     let mut right = width - BORDER - metrics.pad_right;
+    // The buttons of the full title bar are 8 DIPs apart; the strip has one.
+    let button_gap = if strip { 0.0 } else { 8.0 };
     let mut add_button = |target: Target, icon: Icon, color: Role, shapes: &mut Vec<Shape>| {
         let rect = Rect::new(right - button_w, mid - button_h / 2.0, button_w, button_h);
-        right = rect.x;
+        right = rect.x - button_gap;
         if input.hover == Some(target) {
             shapes.push(Shape::Rect {
                 rect,
@@ -144,7 +146,14 @@ pub fn build(input: &Input, width: f32, strip: bool, measure: &dyn Measure) -> T
     let label = countdown_label(seconds);
     let label_font = font(FontKind::Mono, metrics.label_size, 400);
     let label_w = text_box_width(measure, &label, label_font);
-    let label_right = right - if strip { metrics.ring_gap } else { 8.0 + 4.0 };
+    // `right` is now the gap to the left of the last button. The ring and its
+    // label end 4 DIPs inside it; on the strip they are `ring_gap` from the
+    // button.
+    let label_right = if strip {
+        right - metrics.ring_gap
+    } else {
+        right - 4.0
+    };
     shapes.push(text(
         Rect::new(
             label_right - label_w,
@@ -226,13 +235,17 @@ mod tests {
         for rect in [pin, more, hide] {
             assert_eq!((rect.w, rect.h), (36.0, 32.0));
         }
-        // 4 DIPs of padding inside the 1 DIP frame, no gap between buttons.
+        // 4 DIPs of padding inside the 1 DIP frame, 8 DIPs between buttons.
         assert_eq!(hide.right(), 800.0 - 1.0 - 4.0);
-        assert_eq!(more.right(), hide.x);
-        assert_eq!(pin.right(), more.x);
+        assert_eq!(more.right(), hide.x - 8.0);
+        assert_eq!(pin.right(), more.x - 8.0);
         // Centred in the 40 DIP bar.
         assert_eq!(hide.y, 1.0 + 4.0);
         assert!(hit(&scene, Target::Expand).is_none());
+        // The ring and its label end 4 DIPs inside the 8 DIP gap before the
+        // first button.
+        let label = text_of(&scene.title, "1m32s");
+        assert_eq!(label.rect.right(), pin.x - 12.0);
     }
 
     #[test]
