@@ -26,8 +26,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::w;
 
-use super::fetch::{Fetcher, Outcome};
+use super::clipboard;
+use super::credstore::CredStore;
+use super::dialog::Dialog;
+use super::fetch::{Delivery, Fetcher, Source};
 use super::gfx::Renderer;
+use super::pair::{PairResult, Pairer};
 use super::popup::Anchor;
 use super::registry;
 use super::text::Typography;
@@ -36,7 +40,10 @@ use super::util::{pcwstr, wide};
 use crate::contract::GUIDE_URL;
 use crate::menu::{Command, MenuState};
 use crate::placement::{Edges, keep_inside, restore_position, to_px, window_size_px};
-use crate::prefs::{Prefs, save};
+use crate::prefs::{Connection, Prefs, save};
+use crate::remote::address::RemoteAddress;
+use crate::remote::pairing::{self, ApplyError, PairCode, parse_clipboard};
+use crate::remote::store::{Credential, TokenStore};
 use crate::scene::{self, Body, Input, Scene, Spot, Target, WORK_AREA_MARGIN};
 use crate::state::{Schedule, State, countdown};
 use crate::theme::Mode;
@@ -50,6 +57,8 @@ pub enum Reply {
     /// Open the menu. The menu runs its own message loop, so the window
     /// procedure opens it after it has let go of the app.
     Menu(Anchor),
+    /// Show a message box, after the app has been let go of.
+    Dialog(Dialog),
 }
 
 pub struct App {
@@ -69,7 +78,12 @@ pub struct App {
     pub tracking_mouse: bool,
     pub shortcut: bool,
     fetcher: Option<Fetcher>,
-    results: Option<Receiver<Outcome>>,
+    results: Option<Receiver<Delivery>>,
+    /// Counts the changes of connection. A result of an earlier count is of
+    /// a connection that was left, and is dropped.
+    generation: u32,
+    pairer: Option<Pairer>,
+    pairs: Option<Receiver<PairResult>>,
     tray_icon: Option<HICON>,
     tray_mode: Mode,
 }
@@ -119,14 +133,22 @@ impl App {
             shortcut: false,
             fetcher: None,
             results: None,
+            generation: 0,
+            pairer: None,
+            pairs: None,
             tray_icon: None,
             tray_mode: registry::system_mode(),
         }
     }
 
-    pub fn attach_fetcher(&mut self, fetcher: Fetcher, results: Receiver<Outcome>) {
+    pub fn attach_fetcher(&mut self, fetcher: Fetcher, results: Receiver<Delivery>) {
         self.fetcher = Some(fetcher);
         self.results = Some(results);
+    }
+
+    pub fn attach_pairer(&mut self, pairer: Pairer, results: Receiver<PairResult>) {
+        self.pairer = Some(pairer);
+        self.pairs = Some(results);
     }
 
     pub fn visible(&self) -> bool {
@@ -312,11 +334,32 @@ impl App {
 
     // ---- time and data ----
 
+    /// The remote daemon the window asks, when it asks one.
+    fn remote(&self) -> Option<RemoteAddress> {
+        match self.prefs.connection {
+            Connection::Remote => self.prefs.remote_address,
+            Connection::Local => None,
+        }
+    }
+
     fn start_fetch(&mut self) {
+        let source = self.remote().map_or(Source::Local, Source::Remote);
         if let Some(fetcher) = &self.fetcher {
             self.schedule.start();
-            fetcher.request();
+            fetcher.request(source, self.generation);
         }
+    }
+
+    /// The window now asks another daemon: what it knew of the old one is
+    /// gone, results still on their way from it are dropped, and the new one
+    /// is asked at once.
+    fn connection_changed(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.state = State::Loading;
+        self.schedule = Schedule::new(Instant::now());
+        self.scroll = 0.0;
+        self.start_due_fetch();
+        self.rebuild_scene();
     }
 
     /// Starts the first fetch, and any later one that is due.
@@ -340,10 +383,15 @@ impl App {
         let Some(results) = &self.results else {
             return;
         };
-        let outcomes: Vec<Outcome> = results.try_iter().collect();
-        for outcome in outcomes {
+        let deliveries: Vec<Delivery> = results.try_iter().collect();
+        let remote = self.remote();
+        for delivery in deliveries {
+            // The answer of a connection the user has left.
+            if delivery.generation != self.generation {
+                continue;
+            }
             let state = std::mem::replace(&mut self.state, State::Loading);
-            self.state = state.after_fetch(outcome);
+            self.state = state.after_fetch(delivery.outcome, remote.as_ref());
             self.schedule.finish(Instant::now());
         }
         // A refresh asked for during the fetch is due now.
@@ -474,9 +522,14 @@ impl App {
 
     fn click(&mut self, target: Target) -> Reply {
         match target {
-            Target::Pin => self.run(Command::TogglePin),
+            // These commands open no message box.
+            Target::Pin => {
+                self.run(Command::TogglePin);
+            }
             Target::Hide => self.hide(),
-            Target::Expand => self.run(Command::ToggleCompact),
+            Target::Expand => {
+                self.run(Command::ToggleCompact);
+            }
             Target::More => {
                 let rect = self
                     .scene
@@ -495,7 +548,7 @@ impl App {
             }
             Target::Copy => {
                 if let State::Unavailable(failure) = &self.state {
-                    let _ = super::clipboard::set_text(self.hwnd, failure.command);
+                    let _ = clipboard::set_text(self.hwnd, failure.command);
                 }
             }
             Target::Retry => self.refresh_now(),
@@ -526,6 +579,8 @@ impl App {
             opacity: self.prefs.opacity,
             autostart: registry::autostart_enabled(),
             shortcut: self.shortcut,
+            connection: self.prefs.connection,
+            remote: self.prefs.remote_address,
         }
     }
 
@@ -541,7 +596,8 @@ impl App {
         }
     }
 
-    pub fn run(&mut self, command: Command) {
+    pub fn run(&mut self, command: Command) -> Option<Dialog> {
+        let mut dialog = None;
         match command {
             Command::ToggleWindow => self.toggle_visible(),
             Command::ToggleCompact => {
@@ -572,12 +628,117 @@ impl App {
                 self.save_prefs();
                 self.redraw();
             }
+            Command::SetConnection(connection) => self.set_connection(connection),
+            Command::PairFromClipboard => dialog = self.pair_from_clipboard(),
+            Command::ForgetRemote => dialog = self.forget_remote(),
             Command::Refresh => self.refresh_now(),
             Command::ToggleAutostart => {
                 let _ = registry::set_autostart(!registry::autostart_enabled());
             }
             Command::Quit => self.quit(),
         }
+        dialog
+    }
+
+    fn set_connection(&mut self, connection: Connection) {
+        let possible = connection == Connection::Local || self.prefs.remote_address.is_some();
+        if !possible || connection == self.prefs.connection {
+            return;
+        }
+        self.prefs.connection = connection;
+        self.save_prefs();
+        self.connection_changed();
+    }
+
+    /// Reads `<ip>:<port> <code>` from the clipboard. What it holds is not
+    /// trusted: a bad text says so and sends nothing, and a good one is shown
+    /// to the user, with the address, before the code goes anywhere.
+    fn pair_from_clipboard(&mut self) -> Option<Dialog> {
+        let text = clipboard::get_text(self.hwnd).unwrap_or_default();
+        match parse_clipboard(&text) {
+            Err(error) => Some(Dialog::Notice(error.to_string())),
+            Ok((address, code)) => {
+                let plaintext = if address.is_encrypted_path() {
+                    ""
+                } else {
+                    "\n\nThis address is not on Tailscale: the code and the device token \
+                     cross the network as plain text. (plaintext)"
+                };
+                let text = format!(
+                    "Pair this device with the ullage daemon at {address}?\n\n\
+                     The pairing code is sent to that address.{plaintext}"
+                );
+                Some(Dialog::ConfirmPair {
+                    address,
+                    code,
+                    text,
+                })
+            }
+        }
+    }
+
+    /// The user agreed to the pairing: ask the daemon, on a thread.
+    pub fn begin_pairing(&mut self, address: RemoteAddress, code: PairCode) {
+        if let Some(pairer) = &self.pairer {
+            pairer.start(address, code);
+        }
+    }
+
+    /// Takes every pairing that has ended. A new token and its address are
+    /// kept as one step, and the window then asks that daemon.
+    pub fn take_pairings(&mut self) -> Option<Dialog> {
+        let results = self.pairs.as_ref()?;
+        let ended: Vec<PairResult> = results.try_iter().collect();
+        let mut dialog = None;
+        for ended in ended {
+            let address = ended.address;
+            dialog = Some(Dialog::Notice(match ended.outcome {
+                Err(error) => format!("Pairing with {address} failed. {error}"),
+                Ok(token) => {
+                    let credential = Credential { address, token };
+                    let mut next = self.prefs.clone();
+                    next.connection = Connection::Remote;
+                    next.remote_address = Some(address);
+                    let path = self.prefs_path.clone();
+                    let kept = pairing::apply(&CredStore, &credential, || match &path {
+                        Some(path) => save(path, &next),
+                        None => Ok(()),
+                    });
+                    match kept {
+                        Ok(()) => {
+                            self.prefs = next;
+                            self.connection_changed();
+                            format!("Paired with {address}. The window now shows its usage.")
+                        }
+                        Err(ApplyError::Store) => format!(
+                            "Pairing with {address} worked, but the device token could not be \
+                             saved in the Windows Credential Manager. Nothing was changed."
+                        ),
+                        Err(ApplyError::Settings) => format!(
+                            "Pairing with {address} worked, but the settings could not be \
+                             saved. Nothing was changed."
+                        ),
+                    }
+                }
+            }));
+        }
+        dialog
+    }
+
+    /// Deletes the token and the address, and goes back to the local daemon.
+    fn forget_remote(&mut self) -> Option<Dialog> {
+        if CredStore.delete().is_err() {
+            return Some(Dialog::Notice(
+                "The device token could not be removed from the Windows Credential Manager. \
+                 Nothing was changed."
+                    .into(),
+            ));
+        }
+        self.prefs.connection = Connection::Local;
+        self.prefs.remote_address = None;
+        self.save_prefs();
+        self.connection_changed();
+        None
     }
 
     fn layout_changed(&mut self) {

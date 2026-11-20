@@ -1,52 +1,87 @@
-//! The thread that asks the daemon, so the window never waits for it.
+//! The threads that ask the daemon, so the window never waits for it.
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
 use ullage_cli::SystemClient;
-use ullage_cli::usage_view::{FetchError, UsageFetch, fetch_usage};
+use ullage_cli::usage_view::{UsageFetch, fetch_usage};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
+
+use super::credstore::CredStore;
+use crate::remote::address::RemoteAddress;
+use crate::remote::fetch::fetch_remote;
+use crate::state::FailureKind;
 
 /// Posted to the window when a result is waiting.
 pub const WM_FETCH_DONE: u32 = WM_APP + 2;
 
-pub type Outcome = Result<UsageFetch, FetchError>;
+pub type Outcome = Result<UsageFetch, FailureKind>;
+
+/// Which daemon a fetch asks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Local,
+    Remote(RemoteAddress),
+}
+
+/// A result, with the generation of the connection it was asked of. A
+/// result of an earlier generation answers a connection the user has left.
+pub struct Delivery {
+    pub generation: u32,
+    pub outcome: Outcome,
+}
 
 pub struct Fetcher {
-    requests: Sender<()>,
+    results: Sender<Delivery>,
+    target: isize,
 }
 
 impl Fetcher {
-    /// Starts the thread. Each request makes one fetch, and its result is
-    /// sent on the returned channel, with `WM_FETCH_DONE` posted to `hwnd`.
-    pub fn spawn(hwnd: HWND) -> (Self, Receiver<Outcome>) {
-        let (requests, wanted) = channel::<()>();
-        let (results, outcomes) = channel::<Outcome>();
-        // A raw handle value can cross threads; `HWND` itself cannot.
-        let target = hwnd.0 as isize;
-        thread::spawn(move || {
-            while wanted.recv().is_ok() {
-                // The client is made for every fetch, so a changed
-                // environment is picked up.
-                let outcome = fetch_usage(&SystemClient::from_environment());
-                if results.send(outcome).is_err() {
-                    return;
-                }
-                unsafe {
-                    let _ = PostMessageW(
-                        Some(HWND(target as *mut _)),
-                        WM_FETCH_DONE,
-                        WPARAM(0),
-                        LPARAM(0),
-                    );
-                }
-            }
-        });
-        (Self { requests }, outcomes)
+    pub fn spawn(hwnd: HWND) -> (Self, Receiver<Delivery>) {
+        let (results, deliveries) = channel();
+        (
+            Self {
+                results,
+                // A raw handle value can cross threads; `HWND` itself cannot.
+                target: hwnd.0 as isize,
+            },
+            deliveries,
+        )
     }
 
-    pub fn request(&self) {
-        let _ = self.requests.send(());
+    /// Starts one fetch on a thread of its own, so that a fetch of a
+    /// connection the user left does not hold up the next one. Its result
+    /// is sent with `generation`, and `WM_FETCH_DONE` is posted.
+    pub fn request(&self, source: Source, generation: u32) {
+        let results = self.results.clone();
+        let target = self.target;
+        thread::spawn(move || {
+            let outcome = match source {
+                // The client is made for every fetch, so a changed
+                // environment is picked up.
+                Source::Local => {
+                    fetch_usage(&SystemClient::from_environment()).map_err(FailureKind::Fetch)
+                }
+                Source::Remote(address) => fetch_remote(&CredStore, &address),
+            };
+            if results
+                .send(Delivery {
+                    generation,
+                    outcome,
+                })
+                .is_err()
+            {
+                return;
+            }
+            unsafe {
+                let _ = PostMessageW(
+                    Some(HWND(target as *mut _)),
+                    WM_FETCH_DONE,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+        });
     }
 }

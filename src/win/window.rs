@@ -32,8 +32,10 @@ use windows::core::BOOL;
 use windows::core::{PCWSTR, w};
 
 use super::app::{App, Reply};
+use super::dialog;
 use super::fetch::{Fetcher, WM_FETCH_DONE};
 use super::instance::{self, Instance};
+use super::pair::{Pairer, WM_PAIR_DONE};
 use super::popup;
 use super::text::Typography;
 use super::tray::{self, WM_TRAY};
@@ -164,6 +166,10 @@ fn dispatch(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Reply {
             app.take_results();
             Reply::Done(0)
         }
+        WM_PAIR_DONE => match app.take_pairings() {
+            Some(shown) => Reply::Dialog(shown),
+            None => Reply::Done(0),
+        },
         WM_TRAY => match loword(lparam.0) as u32 {
             WM_LBUTTONUP => {
                 app.toggle_visible();
@@ -267,6 +273,10 @@ unsafe extern "system" fn window_proc(
             open_menu(cell, hwnd, anchor);
             LRESULT(0)
         }
+        Reply::Dialog(shown) => {
+            show_dialog(cell, hwnd, shown);
+            LRESULT(0)
+        }
     }
 }
 
@@ -277,10 +287,33 @@ fn open_menu(cell: &RefCell<App>, hwnd: HWND, anchor: popup::Anchor) {
         Ok(app) => app.menu_state(),
         Err(_) => return,
     };
-    if let Some(command) = popup::show(hwnd, &state, anchor)
-        && let Ok(mut app) = cell.try_borrow_mut()
-    {
-        app.run(command);
+    if let Some(command) = popup::show(hwnd, &state, anchor) {
+        let shown = match cell.try_borrow_mut() {
+            Ok(mut app) => app.run(command),
+            Err(_) => None,
+        };
+        if let Some(shown) = shown {
+            show_dialog(cell, hwnd, shown);
+        }
+    }
+}
+
+/// A message box runs its own message loop, so it is shown while the app is
+/// not borrowed. A pairing the user agrees to starts after it closes.
+fn show_dialog(cell: &RefCell<App>, hwnd: HWND, shown: dialog::Dialog) {
+    match shown {
+        dialog::Dialog::Notice(text) => dialog::notice(hwnd, &text),
+        dialog::Dialog::ConfirmPair {
+            address,
+            code,
+            text,
+        } => {
+            if dialog::confirm(hwnd, &text)
+                && let Ok(mut app) = cell.try_borrow_mut()
+            {
+                app.begin_pairing(address, code);
+            }
+        }
     }
 }
 
@@ -382,9 +415,11 @@ pub fn run() {
         Rc::new(text),
     )));
     let (fetcher, results) = Fetcher::spawn(hwnd);
+    let (pairer, pairs) = Pairer::spawn(hwnd);
     {
         let mut app = app.borrow_mut();
         app.attach_fetcher(fetcher, results);
+        app.attach_pairer(pairer, pairs);
         decorate(hwnd);
         app.place_initial(saved, &monitors(), primary);
         unsafe {

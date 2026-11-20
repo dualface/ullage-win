@@ -10,7 +10,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::remote::address::RemoteAddress;
 
 const VERSION: u32 = 1;
 pub const TEXT_SIZES: [u32; 4] = [12, 13, 14, 16];
@@ -30,6 +32,38 @@ pub enum Layout {
     Compact,
 }
 
+/// Which daemon the window asks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Connection {
+    /// The daemon of this host, through its control endpoint.
+    #[default]
+    Local,
+    /// The daemon at `Prefs::remote_address`, through its HTTP API.
+    Remote,
+}
+
+/// Anything but `"remote"` reads as local, and leaves the other settings be.
+fn lenient_connection<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Connection, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value.as_ref().and_then(serde_json::Value::as_str) {
+        Some("remote") => Connection::Remote,
+        _ => Connection::Local,
+    })
+}
+
+/// An address that is not valid reads as none, and leaves the other
+/// settings be.
+fn lenient_address<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<RemoteAddress>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .and_then(|text| RemoteAddress::parse(text).ok()))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
@@ -47,6 +81,15 @@ pub struct Prefs {
     pub click_through: bool,
     pub text_size: u32,
     pub opacity: u32,
+    #[serde(deserialize_with = "lenient_connection")]
+    pub connection: Connection,
+    /// The remote daemon, as `<ip>:<port>`. The token is not here: it is in
+    /// the credential store.
+    #[serde(
+        deserialize_with = "lenient_address",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub remote_address: Option<RemoteAddress>,
 }
 
 impl Default for Prefs {
@@ -61,6 +104,8 @@ impl Default for Prefs {
             click_through: false,
             text_size: DEFAULT_TEXT_SIZE,
             opacity: DEFAULT_OPACITY,
+            connection: Connection::Local,
+            remote_address: None,
         }
     }
 }
@@ -76,6 +121,10 @@ impl Prefs {
         }
         if self.expanded_layout == Layout::Compact {
             self.expanded_layout = Layout::Columns;
+        }
+        // A remote connection needs an address to ask.
+        if self.connection == Connection::Remote && self.remote_address.is_none() {
+            self.connection = Connection::Local;
         }
         self
     }
@@ -244,6 +293,74 @@ mod tests {
         assert_eq!(prefs.text_size, 13);
         assert_eq!(prefs.opacity, 95);
         assert_eq!(prefs.expanded_layout, Layout::Columns);
+    }
+
+    fn read(text: &str) -> Prefs {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("window.json");
+        fs::write(&path, text).unwrap();
+        load(&path)
+    }
+
+    #[test]
+    fn the_connection_is_local_unless_a_remote_one_is_saved() {
+        assert_eq!(Prefs::default().connection, Connection::Local);
+        assert_eq!(Prefs::default().remote_address, None);
+        let remote =
+            read(r#"{"version":1,"connection":"remote","remote_address":"100.71.140.68:7878"}"#);
+        assert_eq!(remote.connection, Connection::Remote);
+        assert_eq!(
+            remote.remote_address,
+            RemoteAddress::parse("100.71.140.68:7878").ok()
+        );
+    }
+
+    #[test]
+    fn a_bad_connection_only_resets_the_connection() {
+        for text in [
+            // An unknown value.
+            r#"{"version":1,"text_size":16,"connection":"elsewhere","remote_address":"100.71.140.68:7878"}"#,
+            r#"{"version":1,"text_size":16,"connection":5}"#,
+            // Remote without an address, or with one that is not allowed.
+            r#"{"version":1,"text_size":16,"connection":"remote"}"#,
+            r#"{"version":1,"text_size":16,"connection":"remote","remote_address":"8.8.8.8:80"}"#,
+            r#"{"version":1,"text_size":16,"connection":"remote","remote_address":"center:7878"}"#,
+            r#"{"version":1,"text_size":16,"connection":"remote","remote_address":7}"#,
+        ] {
+            let prefs = read(text);
+            assert_eq!(prefs.connection, Connection::Local, "{text}");
+            assert_eq!(prefs.text_size, 16, "{text}");
+        }
+        let kept =
+            read(r#"{"version":1,"connection":"elsewhere","remote_address":"100.71.140.68:7878"}"#);
+        assert!(kept.remote_address.is_some());
+    }
+
+    #[test]
+    fn the_remote_address_is_saved_as_text_and_the_token_is_not_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("window.json");
+        let prefs = Prefs {
+            connection: Connection::Remote,
+            remote_address: RemoteAddress::parse("100.71.140.68:7878").ok(),
+            ..Prefs::default()
+        };
+        save(&path, &prefs).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#""connection":"remote""#), "{text}");
+        assert!(
+            text.contains(r#""remote_address":"100.71.140.68:7878""#),
+            "{text}"
+        );
+        assert!(!text.to_lowercase().contains("token"), "{text}");
+        assert_eq!(load(&path), prefs);
+        // Without an address the field is left out.
+        save(&path, &Prefs::default()).unwrap();
+        assert!(
+            !fs::read_to_string(&path)
+                .unwrap()
+                .contains("remote_address")
+        );
     }
 
     #[test]

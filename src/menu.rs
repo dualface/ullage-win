@@ -1,7 +1,8 @@
 //! The tray and "more" menu as data: what it lists, in which order, and
 //! which command each entry runs.
 
-use crate::prefs::{Layout, OPACITIES, TEXT_SIZES};
+use crate::prefs::{Connection, Layout, OPACITIES, TEXT_SIZES};
+use crate::remote::address::RemoteAddress;
 
 /// What choosing a menu entry does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,6 +14,11 @@ pub enum Command {
     SetLayout(Layout),
     SetTextSize(u32),
     SetOpacity(u32),
+    SetConnection(Connection),
+    /// Reads `<ip>:<port> <code>` from the clipboard and pairs with it.
+    PairFromClipboard,
+    /// Deletes the saved token and address of the remote daemon.
+    ForgetRemote,
     Refresh,
     ToggleAutostart,
     Quit,
@@ -28,9 +34,13 @@ const ID_SIMPLE: [Command; 6] = [
     Command::ToggleAutostart,
 ];
 const ID_QUIT: usize = 7;
+const ID_PAIR: usize = 8;
+const ID_FORGET: usize = 9;
 const ID_LAYOUT: usize = 100;
 const ID_SIZE: usize = 200;
 const ID_OPACITY: usize = 300;
+const ID_CONNECTION: usize = 400;
+const CONNECTIONS: [Connection; 2] = [Connection::Local, Connection::Remote];
 const LAYOUTS: [Layout; 3] = [Layout::Columns, Layout::Single, Layout::Compact];
 
 impl Command {
@@ -45,6 +55,15 @@ impl Command {
             Command::SetOpacity(opacity) => {
                 ID_OPACITY + OPACITIES.iter().position(|o| *o == opacity).unwrap_or(0)
             }
+            Command::SetConnection(connection) => {
+                ID_CONNECTION
+                    + CONNECTIONS
+                        .iter()
+                        .position(|c| *c == connection)
+                        .unwrap_or(0)
+            }
+            Command::PairFromClipboard => ID_PAIR,
+            Command::ForgetRemote => ID_FORGET,
             Command::Quit => ID_QUIT,
             simple => 1 + ID_SIMPLE.iter().position(|c| *c == simple).unwrap_or(0),
         }
@@ -54,6 +73,8 @@ impl Command {
         match id {
             1..=6 => Some(ID_SIMPLE[id - 1]),
             ID_QUIT => Some(Command::Quit),
+            ID_PAIR => Some(Command::PairFromClipboard),
+            ID_FORGET => Some(Command::ForgetRemote),
             ID_LAYOUT..=199 => LAYOUTS.get(id - ID_LAYOUT).map(|l| Command::SetLayout(*l)),
             ID_SIZE..=299 => TEXT_SIZES
                 .get(id - ID_SIZE)
@@ -61,6 +82,9 @@ impl Command {
             ID_OPACITY..=399 => OPACITIES
                 .get(id - ID_OPACITY)
                 .map(|o| Command::SetOpacity(*o)),
+            ID_CONNECTION..=499 => CONNECTIONS
+                .get(id - ID_CONNECTION)
+                .map(|c| Command::SetConnection(*c)),
             _ => None,
         }
     }
@@ -78,20 +102,25 @@ pub struct MenuState {
     pub autostart: bool,
     /// Whether the global shortcut is registered.
     pub shortcut: bool,
+    pub connection: Connection,
+    /// The remote daemon this device is paired with, if any.
+    pub remote: Option<RemoteAddress>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
     Command {
         command: Command,
-        label: &'static str,
+        label: String,
         /// Faint text on the right, such as the shortcut.
         right: Option<String>,
         checked: bool,
+        /// A command that cannot run now is shown grayed.
+        enabled: bool,
     },
     Separator,
     Submenu {
-        label: &'static str,
+        label: String,
         right: Option<String>,
         /// Radio entries: exactly one is checked.
         items: Vec<Item>,
@@ -100,12 +129,55 @@ pub enum Item {
 
 pub const SHORTCUT_TEXT: &str = "Win+Alt+U";
 
-fn command(command: Command, label: &'static str, checked: bool) -> Item {
+fn command(command: Command, label: &str, checked: bool) -> Item {
     Item::Command {
         command,
-        label,
+        label: label.to_owned(),
         right: None,
         checked,
+        enabled: true,
+    }
+}
+
+/// The `Connection` submenu: which daemon to ask, and how to pair with a
+/// remote one. A remote address that is not on an encrypted path says so.
+fn connection_menu(state: &MenuState) -> Item {
+    let remote_label = match &state.remote {
+        Some(address) if address.is_encrypted_path() => format!("Remote daemon ({address})"),
+        Some(address) => format!("Remote daemon ({address}) (plaintext)"),
+        None => "Remote daemon".to_owned(),
+    };
+    let paired = state.remote.is_some();
+    Item::Submenu {
+        label: "Connection".to_owned(),
+        right: None,
+        items: vec![
+            command(
+                Command::SetConnection(Connection::Local),
+                "Local daemon",
+                state.connection == Connection::Local,
+            ),
+            Item::Command {
+                command: Command::SetConnection(Connection::Remote),
+                label: remote_label,
+                right: None,
+                checked: state.connection == Connection::Remote,
+                enabled: paired,
+            },
+            Item::Separator,
+            command(
+                Command::PairFromClipboard,
+                "Pair from clipboard\u{2026}",
+                false,
+            ),
+            Item::Command {
+                command: Command::ForgetRemote,
+                label: "Forget remote daemon".to_owned(),
+                right: None,
+                checked: false,
+                enabled: paired,
+            },
+        ],
     }
 }
 
@@ -124,9 +196,11 @@ pub fn items(state: &MenuState) -> Vec<Item> {
                 "Hide window"
             } else {
                 "Show window"
-            },
+            }
+            .to_owned(),
             right: state.shortcut.then(|| SHORTCUT_TEXT.to_owned()),
             checked: false,
+            enabled: true,
         },
         command(
             Command::ToggleCompact,
@@ -141,7 +215,7 @@ pub fn items(state: &MenuState) -> Vec<Item> {
             state.click_through,
         ),
         Item::Submenu {
-            label: "Layout",
+            label: "Layout".to_owned(),
             right: None,
             items: LAYOUTS
                 .iter()
@@ -155,7 +229,7 @@ pub fn items(state: &MenuState) -> Vec<Item> {
                 .collect(),
         },
         Item::Submenu {
-            label: "Text size",
+            label: "Text size".to_owned(),
             right: Some(state.text_size.to_string()),
             items: TEXT_SIZES
                 .iter()
@@ -166,7 +240,7 @@ pub fn items(state: &MenuState) -> Vec<Item> {
                 .collect(),
         },
         Item::Submenu {
-            label: "Opacity",
+            label: "Opacity".to_owned(),
             right: Some(format!("{}%", state.opacity)),
             items: OPACITIES
                 .iter()
@@ -180,6 +254,7 @@ pub fn items(state: &MenuState) -> Vec<Item> {
                 })
                 .collect(),
         },
+        connection_menu(state),
         Item::Separator,
         command(Command::Refresh, "Refresh now", false),
         command(
@@ -206,6 +281,8 @@ mod tests {
             opacity: 95,
             autostart: false,
             shortcut: true,
+            connection: Connection::Local,
+            remote: None,
         }
     }
 
@@ -231,6 +308,7 @@ mod tests {
                 "Layout",
                 "Text size",
                 "Opacity",
+                "Connection",
                 "-",
                 "Refresh now",
                 "Start at sign-in",
@@ -248,9 +326,10 @@ mod tests {
             first(&state),
             Item::Command {
                 command: Command::ToggleWindow,
-                label: "Hide window",
+                label: "Hide window".into(),
                 right: Some("Win+Alt+U".into()),
-                checked: false
+                checked: false,
+                enabled: true
             }
         );
         state.window_visible = false;
@@ -259,9 +338,10 @@ mod tests {
             first(&state),
             Item::Command {
                 command: Command::ToggleWindow,
-                label: "Show window",
+                label: "Show window".into(),
                 right: None,
-                checked: false
+                checked: false,
+                enabled: true
             }
         );
     }
@@ -280,8 +360,8 @@ mod tests {
         assert!(checked(&items[1]), "Compact strip");
         assert!(checked(&items[3]), "Always on top");
         assert!(checked(&items[4]), "Click-through");
-        assert!(checked(&items[10]), "Start at sign-in");
-        assert!(!checked(&items[9]));
+        assert!(checked(&items[11]), "Start at sign-in");
+        assert!(!checked(&items[10]));
         let Item::Submenu { items: layouts, .. } = &items[5] else {
             panic!()
         };
@@ -335,6 +415,66 @@ mod tests {
         assert!(checked(&opacities[1]));
     }
 
+    fn connection_items(state: &MenuState) -> Vec<Item> {
+        let Item::Submenu { items, label, .. } = items(state).remove(8) else {
+            panic!()
+        };
+        assert_eq!(label, "Connection");
+        items
+    }
+
+    fn enabled(item: &Item) -> bool {
+        matches!(item, Item::Command { enabled: true, .. })
+    }
+
+    #[test]
+    fn the_connection_menu_before_pairing_offers_the_local_daemon_and_pairing() {
+        let items = connection_items(&state());
+        assert_eq!(
+            items.iter().map(label).collect::<Vec<_>>(),
+            [
+                "Local daemon",
+                "Remote daemon",
+                "-",
+                "Pair from clipboard\u{2026}",
+                "Forget remote daemon"
+            ]
+        );
+        assert!(checked(&items[0]));
+        assert!(enabled(&items[0]));
+        assert!(!enabled(&items[1]), "no remote daemon to choose yet");
+        assert!(enabled(&items[3]));
+        assert!(!enabled(&items[4]), "nothing to forget yet");
+    }
+
+    #[test]
+    fn a_paired_remote_daemon_shows_its_address_and_can_be_chosen_or_forgotten() {
+        let mut state = state();
+        state.remote = RemoteAddress::parse("100.71.140.68:7878").ok();
+        state.connection = Connection::Remote;
+        let items = connection_items(&state);
+        assert_eq!(label(&items[1]), "Remote daemon (100.71.140.68:7878)");
+        assert!(!checked(&items[0]));
+        assert!(checked(&items[1]));
+        assert!(enabled(&items[1]));
+        assert!(enabled(&items[4]));
+    }
+
+    #[test]
+    fn an_address_off_the_encrypted_paths_says_plaintext() {
+        let mut state = state();
+        state.remote = RemoteAddress::parse("192.168.50.11:7878").ok();
+        assert_eq!(
+            label(&connection_items(&state)[1]),
+            "Remote daemon (192.168.50.11:7878) (plaintext)"
+        );
+        state.remote = RemoteAddress::parse("127.0.0.1:7878").ok();
+        assert_eq!(
+            label(&connection_items(&state)[1]),
+            "Remote daemon (127.0.0.1:7878)"
+        );
+    }
+
     #[test]
     fn command_ids_are_unique_nonzero_and_round_trip() {
         fn walk(items: &[Item], out: &mut Vec<Command>) {
@@ -348,7 +488,7 @@ mod tests {
         }
         let mut commands = Vec::new();
         walk(&items(&state()), &mut commands);
-        assert_eq!(commands.len(), 6 + 1 + 3 + 4 + 5);
+        assert_eq!(commands.len(), 6 + 1 + 3 + 4 + 5 + 4);
         let mut ids: Vec<usize> = commands.iter().map(|c| c.id()).collect();
         for (command, id) in commands.iter().zip(&ids) {
             assert_ne!(*id, 0);

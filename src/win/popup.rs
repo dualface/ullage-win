@@ -4,9 +4,9 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CheckMenuRadioItem, CreatePopupMenu, DestroyMenu, HMENU, MF_BYCOMMAND, MF_CHECKED,
-    MF_POPUP, MF_SEPARATOR, MF_STRING, PostMessageW, SetForegroundWindow, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTALIGN, TPM_RIGHTBUTTON, TPM_TOPALIGN, TrackPopupMenuEx,
-    WM_NULL,
+    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, PostMessageW, SetForegroundWindow,
+    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTALIGN, TPM_RIGHTBUTTON, TPM_TOPALIGN,
+    TrackPopupMenuEx, WM_NULL,
 };
 use windows::core::{PCSTR, Result, w};
 
@@ -63,13 +63,16 @@ fn build(entries: &[Item]) -> Result<HMENU> {
                     label,
                     right,
                     checked,
+                    enabled,
                 } => {
                     let text = text_of(label, right.as_deref());
-                    let flags = if *checked {
-                        MF_STRING | MF_CHECKED
-                    } else {
-                        MF_STRING
-                    };
+                    let mut flags = MF_STRING;
+                    if *checked {
+                        flags |= MF_CHECKED;
+                    }
+                    if !*enabled {
+                        flags |= MF_GRAYED;
+                    }
                     AppendMenuW(menu, flags, command.id(), pcwstr(&text))?;
                 }
                 Item::Submenu {
@@ -99,7 +102,12 @@ fn mark_radio_group(menu: HMENU, items: &[Item]) {
             _ => None,
         })
         .collect();
-    let (Some(first), Some(last)) = (ids.first(), ids.last()) else {
+    // The entries of a group are not always in the order of their ids, and
+    // a group may hold entries that are not options.
+    let (Some(first), Some(last)) = (
+        ids.iter().min_by_key(|(id, _)| *id),
+        ids.iter().max_by_key(|(id, _)| *id),
+    ) else {
         return;
     };
     let Some(checked) = ids.iter().find(|(_, checked)| *checked) else {

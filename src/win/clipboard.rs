@@ -2,15 +2,47 @@
 
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    SetClipboardData,
 };
-use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
 use windows::core::Result;
 
 use super::util::wide;
 
 /// `CF_UNICODETEXT`.
 const UNICODE_TEXT: u32 = 13;
+
+/// The most of the clipboard's text that is read: far more than a pairing
+/// needs, and a bound on what anything else on the clipboard can cost.
+const MAX_READ_UNITS: usize = 1024;
+
+/// The text on the clipboard, or `None` when there is none. At most
+/// [`MAX_READ_UNITS`] UTF-16 units are read.
+pub fn get_text(owner: HWND) -> Option<String> {
+    unsafe {
+        IsClipboardFormatAvailable(UNICODE_TEXT).ok()?;
+        OpenClipboard(Some(owner)).ok()?;
+        let text = (|| {
+            let handle = GetClipboardData(UNICODE_TEXT).ok()?;
+            let memory = HGLOBAL(handle.0);
+            let units = (GlobalSize(memory) / size_of::<u16>()).min(MAX_READ_UNITS);
+            let source = GlobalLock(memory).cast::<u16>();
+            if source.is_null() {
+                return None;
+            }
+            let all = std::slice::from_raw_parts(source, units);
+            let end = all.iter().position(|unit| *unit == 0).unwrap_or(units);
+            let text = String::from_utf16_lossy(&all[..end]);
+            let _ = GlobalUnlock(memory);
+            Some(text)
+        })();
+        let _ = CloseClipboard();
+        text
+    }
+}
 
 pub fn set_text(owner: HWND, text: &str) -> Result<()> {
     let data = wide(text);
