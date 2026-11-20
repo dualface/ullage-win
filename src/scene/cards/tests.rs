@@ -432,29 +432,48 @@ fn the_other_day_dot_forms() {
 
 #[test]
 fn a_reset_beyond_a_week_is_a_pill_with_the_number_of_days() {
-    let mut cards = sample_cards(1);
-    cards[0].rows[1].resets_in = Some(22 * 86_400 + 3_600);
-    let scene = build(&input(Layout::Single, &cards), &FakeMeasure);
-    let label = text_of(&scene.content, "23d");
+    let pill_at = |text_size: u32| {
+        let mut cards = sample_cards(1);
+        cards[0].rows[1].resets_in = Some(22 * 86_400 + 3_600);
+        let mut input = input(Layout::Single, &cards);
+        input.text_size = text_size;
+        let scene = build(&input, &FakeMeasure);
+        let label = text_of(&scene.content, "23d").clone();
+        let pill = scene
+            .content
+            .iter()
+            .find_map(|shape| match shape {
+                Shape::Rect {
+                    rect,
+                    fill: Some(Role::Pill),
+                    radius,
+                    ..
+                } => Some((*rect, *radius)),
+                _ => None,
+            })
+            .unwrap();
+        (label, pill)
+    };
+    let (label, pill) = pill_at(13);
+    assert_eq!(label.font.kind, FontKind::Mono);
     assert_eq!(label.font.size, 11.0);
     assert_eq!(label.color, Role::Sub);
-    let pill = scene
-        .content
-        .iter()
-        .find_map(|shape| match shape {
-            Shape::Rect {
-                rect,
-                fill: Some(Role::Pill),
-                radius,
-                ..
-            } => Some((*rect, *radius)),
-            _ => None,
-        })
-        .unwrap();
     assert_eq!(pill.1, 9.0);
     assert_eq!(pill.0.h, 18.0);
     // 8 DIPs of padding each side of the text.
     assert_eq!(pill.0.w, FakeMeasure.width("23d", label.font).ceil() + 16.0);
+
+    // At the largest text size the text and the pill both grow.
+    let (big_label, big_pill) = pill_at(16);
+    let scale = 16.0 / 13.0;
+    assert_eq!(big_label.font.kind, FontKind::Mono);
+    assert!((big_label.font.size - 11.0 * scale).abs() < 1e-4);
+    assert!((big_pill.0.h - 18.0 * scale).abs() < 1e-4);
+    assert!((big_pill.1 - 9.0 * scale).abs() < 1e-4);
+    assert_eq!(
+        big_pill.0.w,
+        FakeMeasure.width("23d", big_label.font).ceil() + 16.0
+    );
 }
 
 #[test]

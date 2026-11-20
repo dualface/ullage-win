@@ -427,12 +427,15 @@ fn reset_shapes(
         }
         ResetView::Far(days) => {
             let label = format!("{days}d");
-            let label_font = font(FontKind::Ui, 11.0, 400);
+            // The card's own font, at the size the user chose, like the
+            // other text in the reset column.
+            let label_font = font(FontKind::Mono, sizes.size(11.0), 400);
             let width = measure.width(&label, label_font).ceil() + 16.0;
-            let pill = Rect::new(right - width, mid - 9.0, width, 18.0);
+            let height = sizes.size(18.0);
+            let pill = Rect::new(right - width, mid - height / 2.0, width, height);
             body.shapes.push(Shape::Rect {
                 rect: pill,
-                radius: 9.0,
+                radius: height / 2.0,
                 fill: Some(Role::Pill),
                 border: None,
             });
