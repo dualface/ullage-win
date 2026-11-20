@@ -123,12 +123,26 @@ On the host that runs the daemon:
 
 On this host:
 
-1. Copy `<host>:<port> <code>` to the clipboard, for example
-   `100.71.140.68:7878 ABC-DEF` or `center:7878 ABC-DEF`. The host is an IPv4
-   address or a host name.
-2. Choose `Connection` > `Pair from clipboard...`. The window shows the address
-   and asks before it sends the code. After you agree, the window pairs, saves
-   the token, and starts to show that daemon.
+1. Choose `Connection` > `Pair...` in the tray menu. A dialog opens with two
+   boxes.
+2. In `Address`, type `<host>:<port>` of the daemon, for example
+   `100.71.140.68:7878` or `center:7878`. The host is an IPv4 address or a host
+   name. The box starts with the address of the last pairing. A line under the
+   box says why an address is not taken.
+3. In `Pair code`, type the code, for example `ABC-DEF`. The box takes only the
+   characters the daemon uses for a code (letters in capitals, and the digits 2
+   to 9, without `I`, `L`, `O` and `U`), writes them in capitals, and adds the
+   hyphen after the third character. A code that you paste in is made into the
+   same form. `OK` can be pressed only when the address is taken and the code
+   is complete, in the form `XXX-XXX`.
+4. Press `OK` (or Enter). When the address is not on Tailscale, the window first
+   asks whether to go on, because the code and the token then cross the network
+   as plain text (`(plaintext)`). Then the window pairs, saves the token, and
+   starts to show that daemon. `Cancel` and Esc close the dialog and send
+   nothing.
+
+The dialog is a plain Windows dialog: it does not follow the dark mode of the
+system.
 
 Use `Connection` > `Local daemon` to go back to the daemon of this host, and
 `Connection` > `Forget remote daemon` to delete the token and the address.
