@@ -313,8 +313,12 @@ mod tests {
         ]);
         let response = send(&server.address, &get("/x"), WAIT).unwrap();
         assert_eq!(response.status, 302);
-        assert_eq!(server.finish_after(Duration::from_millis(200)).len(), 1);
-        assert!(target.finish_after(Duration::from_millis(200)).is_empty());
+        assert_eq!(server.finish_after(Duration::from_millis(200)).0.len(), 1);
+        // Nothing connected to where the redirect points, not even to
+        // open a connection and close it.
+        let (seen, accepted) = target.finish_after(Duration::from_millis(200));
+        assert!(seen.is_empty());
+        assert_eq!(accepted, 0);
     }
 
     #[test]

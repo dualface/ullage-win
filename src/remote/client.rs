@@ -7,7 +7,7 @@
 //! `ControlResponse` the control socket would have given.
 
 use std::cell::Cell;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use ullage_cli::{ClientError, ControlClient};
@@ -51,6 +51,7 @@ impl ControlClient for HttpClient {
         if !matches!(request.command, ControlCommand::Show { account_id: None }) {
             return Err(ClientError::InvalidResponse);
         }
+        let started = Instant::now();
         let authorization = format!("Bearer {}", self.token.expose());
         let answer = http::send(
             &self.address,
@@ -66,6 +67,10 @@ impl ControlClient for HttpClient {
             HttpError::Unreachable | HttpError::TimedOut => ClientError::DaemonUnavailable,
             HttpError::Invalid | HttpError::TooLarge => ClientError::InvalidResponse,
         })?;
+        // The reading of the answer is inside the limit too.
+        if started.elapsed() > FETCH_TIMEOUT {
+            return Err(ClientError::DaemonUnavailable);
+        }
         match map_response(answer.status, &answer.body, &request.request_id) {
             Mapped::Response(response) => Ok(*response),
             Mapped::Rejected => {

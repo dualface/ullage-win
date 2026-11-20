@@ -1,8 +1,10 @@
 //! A daemon for tests: a listener on the loopback that answers each
 //! connection with a prepared reply and keeps what it was sent.
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -28,6 +30,8 @@ pub struct Seen {
 pub struct Server {
     pub address: RemoteAddress,
     handle: JoinHandle<Vec<Seen>>,
+    stop: Arc<AtomicBool>,
+    accepted: Arc<AtomicUsize>,
 }
 
 impl Server {
@@ -36,15 +40,16 @@ impl Server {
         self.handle.join().expect("the test server ended")
     }
 
-    /// Like [`Server::finish`], for a server that was given more replies than
-    /// the client asks for: gives it a moment, then stops waiting.
-    pub fn finish_after(self, wait: Duration) -> Vec<Seen> {
+    /// For a server that was given more replies than the client asks for, or
+    /// that must see nothing: gives the client a moment, then stops the
+    /// server. Returns what was seen, and how many connections were
+    /// accepted, whatever they sent. A connection that sent nothing, or only
+    /// a part of a request, is counted here and not seen.
+    pub fn finish_after(self, wait: Duration) -> (Vec<Seen>, usize) {
         thread::sleep(wait);
-        // Connect once per reply left, so that the listener's loop ends.
-        for _ in 0..4 {
-            let _ = std::net::TcpStream::connect(self.address.socket_addr());
-        }
-        self.finish()
+        self.stop.store(true, Ordering::SeqCst);
+        let seen = self.handle.join().expect("the test server ended");
+        (seen, self.accepted.load(Ordering::SeqCst))
     }
 }
 
@@ -68,38 +73,61 @@ pub fn reply(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
 }
 
 /// Listens on a free loopback port and answers one connection per reply.
-/// With no replies the listener is closed again when the server is dropped,
-/// which leaves a port nobody listens on.
 pub fn serve(replies: Vec<Reply>) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a free port");
+    listener
+        .set_nonblocking(true)
+        .expect("a listener that polls");
     let address = RemoteAddress::parse(&listener.local_addr().unwrap().to_string()).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let (stopped, counted) = (stop.clone(), accepted.clone());
     let handle = thread::spawn(move || {
         let mut seen = Vec::new();
-        for reply in replies {
-            let Ok((mut stream, _)) = listener.accept() else {
-                break;
+        let mut replies = replies.into_iter();
+        let mut next = replies.next();
+        while next.is_some() {
+            let mut stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    if stopped.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(_) => break,
             };
+            counted.fetch_add(1, Ordering::SeqCst);
+            let _ = stream.set_nonblocking(false);
             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let (head, body) = read_request(&mut stream);
             if head.is_empty() {
-                // A connection that sent nothing: it only woke the listener.
-                break;
+                // A connection that sent no request: the reply stays.
+                continue;
             }
             seen.push(Seen {
                 head,
                 body,
                 address,
             });
-            match reply {
-                Reply::Raw(bytes) => {
+            match next.take() {
+                Some(Reply::Raw(bytes)) => {
                     let _ = stream.write_all(&bytes);
                 }
-                Reply::Hang(wait) => thread::sleep(wait),
+                Some(Reply::Hang(wait)) => thread::sleep(wait),
+                None => {}
             }
+            next = replies.next();
         }
         seen
     });
-    Server { address, handle }
+    Server {
+        address,
+        handle,
+        stop,
+        accepted,
+    }
 }
 
 fn read_request(stream: &mut std::net::TcpStream) -> (String, Vec<u8>) {
@@ -131,4 +159,34 @@ fn read_request(stream: &mut std::net::TcpStream) -> (String, Vec<u8>) {
         }
     }
     (head, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    use super::*;
+
+    #[test]
+    fn a_connection_is_counted_whatever_it_sends() {
+        // The watch must see a connection that sends nothing, one that sends
+        // part of a request, and one that sends all of it.
+        let server = serve(vec![Reply::Raw(ok(b"{}"))]);
+        drop(TcpStream::connect(server.address.socket_addr()).unwrap());
+        let mut partial = TcpStream::connect(server.address.socket_addr()).unwrap();
+        partial.write_all(b"GET /x HTT").unwrap();
+        drop(partial);
+        let (seen, accepted) = server.finish_after(Duration::from_millis(200));
+        assert!(seen.is_empty());
+        assert_eq!(accepted, 2);
+    }
+
+    #[test]
+    fn a_server_nobody_connects_to_has_seen_and_accepted_nothing() {
+        let server = serve(vec![Reply::Raw(ok(b"{}"))]);
+        let (seen, accepted) = server.finish_after(Duration::from_millis(50));
+        assert!(seen.is_empty());
+        assert_eq!(accepted, 0);
+    }
 }

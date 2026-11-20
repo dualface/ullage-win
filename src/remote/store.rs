@@ -63,6 +63,17 @@ pub trait TokenStore {
     fn delete(&self) -> Result<(), StoreError>;
 }
 
+/// The credential saved for `address`: the one rule that decides whether
+/// this device is paired with that daemon. A fetch and the menu both use it.
+/// A token saved for another address, none, or one that cannot be read, is
+/// not paired.
+pub fn credential_for(store: &dyn TokenStore, address: &RemoteAddress) -> Option<Credential> {
+    match store.load() {
+        Ok(Some(credential)) if credential.address == *address => Some(credential),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 pub mod memory {
     use std::cell::RefCell;
@@ -76,6 +87,10 @@ pub mod memory {
         /// Saves from this many on fail: `Some(0)` fails them all.
         pub fail_saves_after: std::cell::Cell<Option<usize>>,
         saves: std::cell::Cell<usize>,
+        /// Reading fails.
+        pub fail_load: std::cell::Cell<bool>,
+        /// How many times `delete` was called.
+        pub deletes: std::cell::Cell<usize>,
     }
 
     impl MemoryStore {
@@ -89,6 +104,9 @@ pub mod memory {
 
     impl TokenStore for MemoryStore {
         fn load(&self) -> Result<Option<Credential>, StoreError> {
+            if self.fail_load.get() {
+                return Err(StoreError);
+            }
             Ok(self.credential.borrow().clone())
         }
 
@@ -107,6 +125,7 @@ pub mod memory {
         }
 
         fn delete(&self) -> Result<(), StoreError> {
+            self.deletes.set(self.deletes.get() + 1);
             *self.credential.borrow_mut() = None;
             Ok(())
         }
@@ -136,6 +155,25 @@ mod tests {
             assert!(Token::parse(text).is_none(), "{text:?}");
         }
         assert!(Token::parse(&"a".repeat(TOKEN_MAX_LEN)).is_some());
+    }
+
+    #[test]
+    fn only_a_token_saved_for_the_address_pairs_with_it() {
+        let address = RemoteAddress::parse("100.71.140.68:7878").unwrap();
+        let other = RemoteAddress::parse("10.0.0.1:7878").unwrap();
+        let credential = Credential {
+            address,
+            token: Token::parse("tok").unwrap(),
+        };
+        let store = memory::MemoryStore::with(credential.clone());
+        assert_eq!(credential_for(&store, &address), Some(credential));
+        assert_eq!(credential_for(&store, &other), None);
+        store.fail_load.set(true);
+        assert_eq!(credential_for(&store, &address), None);
+        assert_eq!(
+            credential_for(&memory::MemoryStore::default(), &address),
+            None
+        );
     }
 
     #[test]

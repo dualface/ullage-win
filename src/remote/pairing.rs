@@ -6,7 +6,7 @@
 //! together, so that they never get out of step.
 
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -130,6 +130,7 @@ pub fn pair(
     code: &PairCode,
     device_name: &str,
 ) -> Result<Token, PairError> {
+    let started = Instant::now();
     let body = serde_json::json!({ "pair_code": code.0, "device_name": device_name }).to_string();
     let answer = http::send(
         address,
@@ -145,6 +146,10 @@ pub fn pair(
         HttpError::Unreachable | HttpError::TimedOut => PairError::Unreachable,
         HttpError::Invalid | HttpError::TooLarge => PairError::Failed,
     })?;
+    // One limit for the whole pairing, the reading of the answer included.
+    if started.elapsed() > PAIR_TIMEOUT {
+        return Err(PairError::Unreachable);
+    }
     match answer.status {
         200 => serde_json::from_slice::<PairReply>(&answer.body)
             .ok()
@@ -190,6 +195,43 @@ pub fn apply(
         ApplyError::Settings
     } else {
         ApplyError::Rollback
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForgetError {
+    /// The saved credential could not be read. Nothing was changed.
+    Read,
+    /// The credential could not be deleted. Nothing was changed.
+    Delete,
+    /// The settings could not be saved. The credential is as it was before.
+    Settings,
+    /// The settings could not be saved, and the credential could not be put
+    /// back: the pairing is lost.
+    Rollback,
+}
+
+/// Deletes the credential and saves the settings that no longer name the
+/// remote daemon, as one step. The credential is read first: what cannot be
+/// read cannot be put back, so nothing is deleted. When the settings then
+/// fail to save, the credential goes back.
+pub fn forget(
+    store: &dyn TokenStore,
+    save_settings: impl FnOnce() -> std::io::Result<()>,
+) -> Result<(), ForgetError> {
+    let before = store.load().map_err(|StoreError| ForgetError::Read)?;
+    store.delete().map_err(|StoreError| ForgetError::Delete)?;
+    if save_settings().is_ok() {
+        return Ok(());
+    }
+    let restored = match &before {
+        Some(earlier) => store.save(earlier),
+        None => Ok(()),
+    };
+    Err(if restored.is_ok() {
+        ForgetError::Settings
+    } else {
+        ForgetError::Rollback
     })
 }
 
@@ -383,6 +425,57 @@ mod tests {
             Err(io::Error::other("disk full"))
         });
         assert_eq!(result, Err(ApplyError::Rollback));
+    }
+
+    #[test]
+    fn forgetting_deletes_the_credential_once_the_settings_are_saved() {
+        let store = MemoryStore::with(credential("old-token"));
+        forget(&store, || Ok(())).unwrap();
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn a_credential_that_cannot_be_read_is_not_deleted() {
+        let store = MemoryStore::with(credential("old-token"));
+        store.fail_load.set(true);
+        let mut saved = false;
+        let result = forget(&store, || {
+            saved = true;
+            Ok(())
+        });
+        assert_eq!(result, Err(ForgetError::Read));
+        assert_eq!(store.deletes.get(), 0);
+        assert!(!saved);
+    }
+
+    #[test]
+    fn forgetting_with_settings_that_do_not_save_puts_the_credential_back() {
+        let old = credential("old-token");
+        let store = MemoryStore::with(old.clone());
+        let result = forget(&store, || Err(io::Error::other("disk full")));
+        assert_eq!(result, Err(ForgetError::Settings));
+        assert_eq!(store.load().unwrap(), Some(old));
+        // A credential that cannot be put back is told apart.
+        let store = MemoryStore::with(credential("old-token"));
+        store.fail_saves_after.set(Some(0));
+        let result = forget(&store, || Err(io::Error::other("disk full")));
+        assert_eq!(result, Err(ForgetError::Rollback));
+    }
+
+    #[test]
+    fn forgetting_when_there_is_no_credential_still_saves_the_settings() {
+        let store = MemoryStore::default();
+        let mut saved = false;
+        forget(&store, || {
+            saved = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(saved);
+        // And with settings that fail there is nothing to put back.
+        let result = forget(&store, || Err(io::Error::other("disk full")));
+        assert_eq!(result, Err(ForgetError::Settings));
+        assert_eq!(store.load().unwrap(), None);
     }
 
     #[test]

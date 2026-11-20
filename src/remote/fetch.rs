@@ -1,11 +1,13 @@
 //! One fetch from a remote daemon: the saved credential, the client, and
 //! `fetch_usage` of `ullage-cli`.
 
+use std::time::Instant;
+
 use ullage_cli::usage_view::{FetchError, UsageFetch, fetch_usage};
 
 use super::address::RemoteAddress;
-use super::client::HttpClient;
-use super::store::TokenStore;
+use super::client::{FETCH_TIMEOUT, HttpClient};
+use super::store::{TokenStore, credential_for};
 use crate::state::FailureKind;
 
 /// Fetches the usage from `address`, with the token saved for that address.
@@ -15,19 +17,25 @@ pub fn fetch_remote(
     store: &dyn TokenStore,
     address: &RemoteAddress,
 ) -> Result<UsageFetch, FailureKind> {
-    let credential = match store.load() {
-        Ok(Some(credential)) if credential.address == *address => credential,
-        _ => return Err(FailureKind::NotPaired),
+    let Some(credential) = credential_for(store, address) else {
+        return Err(FailureKind::NotPaired);
     };
+    let started = Instant::now();
     let client = HttpClient::new(*address, credential.token);
-    fetch_usage(&client).map_err(|error| {
+    let fetched = fetch_usage(&client).map_err(|error| {
         // `ClientError` has no word for a refused token: the client noted it.
         if error == FetchError::InvalidResponse && client.was_rejected() {
             FailureKind::TokenRejected
         } else {
             FailureKind::Fetch(error)
         }
-    })
+    })?;
+    // One limit for the whole fetch, the checks of `fetch_usage` included:
+    // a result that arrives after it is dropped.
+    if started.elapsed() > FETCH_TIMEOUT {
+        return Err(FailureKind::Fetch(FetchError::DaemonUnavailable));
+    }
+    Ok(fetched)
 }
 
 #[cfg(test)]
@@ -79,7 +87,10 @@ mod tests {
                 FailureKind::NotPaired
             );
         }
-        assert!(server.finish_after(Duration::from_millis(200)).is_empty());
+        // Not even a connection was made.
+        let (seen, accepted) = server.finish_after(Duration::from_millis(200));
+        assert!(seen.is_empty());
+        assert_eq!(accepted, 0);
     }
 
     #[test]
