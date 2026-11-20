@@ -123,8 +123,9 @@ On the host that runs the daemon:
 
 On this host:
 
-1. Copy `<ip>:<port> <code>` to the clipboard, for example
-   `100.71.140.68:7878 ABC-DEF`.
+1. Copy `<host>:<port> <code>` to the clipboard, for example
+   `100.71.140.68:7878 ABC-DEF` or `center:7878 ABC-DEF`. The host is an IPv4
+   address or a host name.
 2. Choose `Connection` > `Pair from clipboard...`. The window shows the address
    and asks before it sends the code. After you agree, the window pairs, saves
    the token, and starts to show that daemon.
@@ -134,9 +135,25 @@ Use `Connection` > `Local daemon` to go back to the daemon of this host, and
 
 Some points to know:
 
-- Only an IPv4 address is accepted, and only a loopback, Tailscale (100.64.0.0/10)
-  or private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) one. A host name or a
-  public address is refused.
+- The host is an IPv4 address or a host name (letters, digits, hyphens and
+  dots, case does not matter). IPv6 is not supported, neither as an address nor
+  as the answer for a name: only the IPv4 answers of a name are used.
+- A host name is looked up again for every fetch and every pairing, so a
+  daemon whose address changed is found without pairing again. Only a loopback,
+  Tailscale (100.64.0.0/10) or private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+  address may receive the token. When a name resolves to any other address, the
+  window sends nothing and says which address it got. A public address that you
+  write yourself is refused in the same way. The first eight answers of a name
+  are looked at, and tried in order.
+- The device token belongs to the text of the address that was paired
+  (a name is kept in lower case). Pairing with `center:7878` does not carry over
+  to `100.71.140.68:7878`, nor to another name of the same host: pair again.
+- The request names the address that was connected to in its `Host` header,
+  because the daemon accepts only the addresses it listens on. It never sends
+  the name.
+- Someone who controls the DNS answers of your network can point a name at
+  another host in your own network, which then receives the pairing code or the
+  token. If that matters, use an IP address.
 - The HTTP API has no TLS. On Tailscale the traffic is encrypted by WireGuard,
   and a loopback address never leaves the host. The window takes every address
   of 100.64.0.0/10 to be on Tailscale. Some other networks use that range too
@@ -144,6 +161,11 @@ Some points to know:
   traffic is not encrypted, although the menu entry does not say so. On any other address, that is a
   private network address, the token and the usage cross the network as plain
   text, and the menu entry and the question before pairing say `(plaintext)`.
+  A host name is judged by its spelling, not by where it points: `localhost`
+  and names that end in `.ts.net` are taken to be encrypted, and every other
+  name says `(plaintext)`, even when it points to a Tailscale address. A
+  `.ts.net` name that points to a private address that is not on Tailscale is
+  plain text without the note.
 - The device token is kept in the Windows Credential Manager, under the name
   `Ullage Window remote token`, together with the address it belongs to. It is
   never written to `window.json` or to any log.
