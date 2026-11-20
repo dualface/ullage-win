@@ -81,14 +81,15 @@ fn lookup_in_thread(
     // What is left is read after the thread is made, so the time that took
     // is not waited for on top of the deadline.
     let wait = deadline.remaining().map_err(|_| ResolveError::Timeout)?;
-    let found = match receiver.recv_timeout(wait) {
-        Ok(Ok(found)) => found,
-        Ok(Err(_)) => return Err(ResolveError::LookupFailed),
+    let answer = match receiver.recv_timeout(wait) {
+        Ok(Ok(found)) => Ok(found),
+        Ok(Err(_)) => Err(ResolveError::LookupFailed),
         Err(_) => return Err(ResolveError::Timeout),
     };
-    // An answer that comes at the deadline is too late, like any other.
-    deadline.remaining().map_err(|_| ResolveError::Timeout)?;
-    Ok(found)
+    // An answer that is read at the deadline is too late, a failure like a
+    // success: the failure of a lookup that went on past it is not told as
+    // one that failed in time.
+    deadline.judge(answer, ResolveError::Timeout)
 }
 
 /// The addresses to connect to, in the order to try them.
@@ -318,6 +319,15 @@ mod tests {
         });
         assert_eq!(found, Err(ResolveError::Timeout));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn an_answer_read_after_the_deadline_is_a_timeout_whether_it_worked_or_not() {
+        let late = || Deadline::late_after(Duration::from_secs(5));
+        let worked = lookup_in_thread(&late(), || Ok(vec!["10.0.0.1".parse().unwrap()]));
+        assert_eq!(worked, Err(ResolveError::Timeout));
+        let failed = lookup_in_thread(&late(), || Err(io::Error::other("no such host")));
+        assert_eq!(failed, Err(ResolveError::Timeout));
     }
 
     #[test]
