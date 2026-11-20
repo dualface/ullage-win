@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 use ullage_cli::usage_view::{FetchError, UsageFetch};
 use ullage_protocol::{CONTROL_PROTOCOL_VERSION, SnapshotPayload};
 
+use crate::remote::address::RemoteAddress;
+
 /// Seconds between the end of one fetch and the start of the next.
 pub const REFRESH_SECS: u64 = 120;
 const REFRESH: Duration = Duration::from_secs(REFRESH_SECS);
@@ -62,6 +64,44 @@ pub fn failure_for(error: &FetchError) -> Failure {
     }
 }
 
+/// Why a fetch gave nothing: one of the five kinds `fetch_usage` knows, or
+/// one only a remote daemon has.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FailureKind {
+    Fetch(FetchError),
+    /// The settings name a remote daemon, but no token is saved for it.
+    NotPaired,
+    /// The remote daemon answered `401`: it does not know the token.
+    TokenRejected,
+}
+
+/// The words for a failed fetch. `remote` is the address of the remote
+/// daemon, when that is the one that was asked.
+pub fn failure_for_kind(kind: &FailureKind, remote: Option<&RemoteAddress>) -> Failure {
+    let pair_here = "Run the command on the host that runs the daemon. Copy \"<ip>:<port> <code>\" \
+                     and choose Connection > Pair from clipboard.";
+    match (kind, remote) {
+        (FailureKind::NotPaired, _) => Failure {
+            title: "No remote daemon paired".into(),
+            body: pair_here.into(),
+            command: "ullage device pair",
+        },
+        (FailureKind::TokenRejected, _) => Failure {
+            title: "Remote daemon rejected this device".into(),
+            body: "The device token is no longer valid. Pair this device again.".into(),
+            command: "ullage device pair",
+        },
+        (FailureKind::Fetch(FetchError::DaemonUnavailable), Some(address)) => Failure {
+            title: format!("Can't reach {address}"),
+            body: "Check that the host is on, that its ullage config has http.enabled set, and \
+                   that it listens on that address. Run the command on that host."
+                .into(),
+            command: "ullage daemon status",
+        },
+        (FailureKind::Fetch(error), _) => failure_for(error),
+    }
+}
+
 /// What the window has to show.
 #[derive(Clone, Debug, PartialEq)]
 pub enum State {
@@ -76,12 +116,18 @@ pub enum State {
 }
 
 impl State {
-    pub fn after_fetch(self, result: Result<UsageFetch, FetchError>) -> State {
+    pub fn after_fetch(
+        self,
+        result: Result<UsageFetch, FailureKind>,
+        remote: Option<&RemoteAddress>,
+    ) -> State {
         match result {
             Ok(fetch) => State::Ready(fetch.snapshots),
-            Err(error) => match self {
+            Err(kind) => match self {
                 State::Ready(snapshots) | State::Stalled(snapshots) => State::Stalled(snapshots),
-                State::Loading | State::Unavailable(_) => State::Unavailable(failure_for(&error)),
+                State::Loading | State::Unavailable(_) => {
+                    State::Unavailable(failure_for_kind(&kind, remote))
+                }
             },
         }
     }
@@ -272,12 +318,12 @@ mod tests {
     #[test]
     fn a_fetch_that_works_gives_ready_even_with_no_snapshots() {
         assert_eq!(
-            State::Loading.after_fetch(Ok(fetch(0))),
+            State::Loading.after_fetch(Ok(fetch(0)), None),
             State::Ready(Vec::new())
         );
         assert_eq!(
             State::Unavailable(failure_for(&FetchError::DaemonUnavailable))
-                .after_fetch(Ok(fetch(2)))
+                .after_fetch(Ok(fetch(2)), None)
                 .snapshots()
                 .map(<[_]>::len),
             Some(2)
@@ -286,13 +332,14 @@ mod tests {
 
     #[test]
     fn a_failure_without_data_is_unavailable() {
-        let state = State::Loading.after_fetch(Err(FetchError::InvalidEndpoint));
+        let state =
+            State::Loading.after_fetch(Err(FailureKind::Fetch(FetchError::InvalidEndpoint)), None);
         assert_eq!(
             state,
             State::Unavailable(failure_for(&FetchError::InvalidEndpoint))
         );
         // The next failure replaces the words.
-        let state = state.after_fetch(Err(FetchError::DaemonUnavailable));
+        let state = state.after_fetch(Err(FailureKind::Fetch(FetchError::DaemonUnavailable)), None);
         assert_eq!(
             state,
             State::Unavailable(failure_for(&FetchError::DaemonUnavailable))
@@ -302,11 +349,67 @@ mod tests {
     #[test]
     fn a_failure_with_data_keeps_the_data() {
         let ready = State::Ready(fetch(2).snapshots);
-        let stalled = ready.after_fetch(Err(FetchError::DaemonUnavailable));
+        let stalled =
+            ready.after_fetch(Err(FailureKind::Fetch(FetchError::DaemonUnavailable)), None);
         assert!(matches!(&stalled, State::Stalled(snapshots) if snapshots.len() == 2));
-        let again = stalled.after_fetch(Err(FetchError::InvalidResponse));
+        let again = stalled.after_fetch(Err(FailureKind::Fetch(FetchError::InvalidResponse)), None);
         assert!(matches!(&again, State::Stalled(snapshots) if snapshots.len() == 2));
-        assert!(matches!(again.after_fetch(Ok(fetch(1))), State::Ready(s) if s.len() == 1));
+        assert!(matches!(again.after_fetch(Ok(fetch(1)), None), State::Ready(s) if s.len() == 1));
+    }
+
+    fn remote() -> RemoteAddress {
+        RemoteAddress::parse("100.71.140.68:7878").unwrap()
+    }
+
+    #[test]
+    fn a_remote_daemon_has_words_for_what_only_it_can_do() {
+        let address = remote();
+        let not_paired = failure_for_kind(&FailureKind::NotPaired, Some(&address));
+        assert_eq!(not_paired.title, "No remote daemon paired");
+        assert_eq!(not_paired.command, "ullage device pair");
+        assert!(not_paired.body.contains("Pair from clipboard"));
+        let rejected = failure_for_kind(&FailureKind::TokenRejected, Some(&address));
+        assert_eq!(rejected.title, "Remote daemon rejected this device");
+        assert_eq!(rejected.command, "ullage device pair");
+        let unreachable = failure_for_kind(
+            &FailureKind::Fetch(FetchError::DaemonUnavailable),
+            Some(&address),
+        );
+        assert_eq!(unreachable.title, "Can't reach 100.71.140.68:7878");
+        assert_eq!(unreachable.command, "ullage daemon status");
+    }
+
+    #[test]
+    fn the_other_failures_of_a_remote_daemon_keep_the_words_of_a_local_one() {
+        let address = remote();
+        for error in [
+            FetchError::InvalidEndpoint,
+            FetchError::InvalidResponse,
+            FetchError::Daemon(Box::new(ControlResult::Snapshots(Vec::new()))),
+        ] {
+            assert_eq!(
+                failure_for_kind(&FailureKind::Fetch(error.clone()), Some(&address)),
+                failure_for(&error)
+            );
+        }
+        // Without an address the local words are used, whatever the kind.
+        assert_eq!(
+            failure_for_kind(&FailureKind::Fetch(FetchError::DaemonUnavailable), None),
+            failure_for(&FetchError::DaemonUnavailable)
+        );
+    }
+
+    #[test]
+    fn a_remote_failure_without_data_is_unavailable_with_the_address() {
+        let address = remote();
+        let state = State::Loading.after_fetch(Err(FailureKind::TokenRejected), Some(&address));
+        assert_eq!(
+            state,
+            State::Unavailable(failure_for_kind(
+                &FailureKind::TokenRejected,
+                Some(&address)
+            ))
+        );
     }
 
     #[test]

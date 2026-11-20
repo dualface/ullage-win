@@ -10,6 +10,7 @@ mod icons;
 mod menu;
 mod placement;
 mod prefs;
+mod remote;
 mod scene;
 mod state;
 mod svgpath;
