@@ -138,7 +138,10 @@ Some points to know:
   or private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) one. A host name or a
   public address is refused.
 - The HTTP API has no TLS. On Tailscale the traffic is encrypted by WireGuard,
-  and a loopback address never leaves the host. On any other address, that is a
+  and a loopback address never leaves the host. The window takes every address
+  of 100.64.0.0/10 to be on Tailscale. Some other networks use that range too
+  (carrier-grade NAT): when the daemon is not reached through Tailscale, the
+  traffic is not encrypted, although the menu entry does not say so. On any other address, that is a
   private network address, the token and the usage cross the network as plain
   text, and the menu entry and the question before pairing say `(plaintext)`.
 - The device token is kept in the Windows Credential Manager, under the name
