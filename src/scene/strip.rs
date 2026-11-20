@@ -19,25 +19,13 @@ const CELL: (f32, f32) = (4.0, 8.0);
 const CELL_GAP: f32 = 1.0;
 /// A row name never takes more than this, so the account keeps its room.
 const MAX_NAME_WIDTH: f32 = 90.0;
+/// What follows the name of a metric that is switched off.
+const OFF_MARKER: &str = " off";
 
 /// What one line shows; an account with no row reads `no data`.
 struct Line<'a> {
     card: &'a UsageCard,
     row: Option<&'a UsageRow>,
-}
-
-pub(super) fn empty(body: &mut Content, inner_width: f32, scale: f32, measure: &dyn Measure) {
-    let _ = measure;
-    let height = ROW_HEIGHT * scale;
-    body.shapes.push(text(
-        Rect::new(PAD_SIDE, 0.0, inner_width - 2.0 * PAD_SIDE, height),
-        "No subscription snapshots",
-        font(FontKind::Ui, 12.0 * scale, 400),
-        Role::Faint,
-        Align::Center,
-        true,
-    ));
-    body.height = height + PAD_BOTTOM;
 }
 
 pub(super) fn build(
@@ -92,23 +80,47 @@ pub(super) fn build(
         let bar_x = right - BAR_WIDTH;
         let reading_right = bar_x - COLUMN_GAP;
         let name = line.row.map(|row| row.name.as_str()).unwrap_or("");
+        let off = line.row.is_some_and(|row| row.off);
+        // The `off` marker follows the name, in the same faint colour as the
+        // name, and is cut last.
+        let off_w = if off {
+            text_box_width(measure, OFF_MARKER, name_font)
+        } else {
+            0.0
+        };
         let name_w = if name.is_empty() {
             0.0
         } else {
-            text_box_width(measure, name, name_font).min(MAX_NAME_WIDTH)
+            (text_box_width(measure, name, name_font) + off_w).min(MAX_NAME_WIDTH)
         };
         let name_right = reading_right - reading_col - COLUMN_GAP;
         let label_right = name_right - name_w - if name_w > 0.0 { COLUMN_GAP } else { 0.0 };
 
         if name_w > 0.0 {
+            let name_box = (name_w - off_w).max(0.0);
             body.shapes.push(text(
-                Rect::new(name_right - name_w, y, name_w, row_height),
+                Rect::new(name_right - name_w, y, name_box, row_height),
                 name,
                 name_font,
                 Role::Faint,
-                Align::Right,
+                Align::Left,
                 true,
             ));
+            if off && name_w > name_box {
+                body.shapes.push(text(
+                    Rect::new(
+                        name_right - name_w + name_box,
+                        y,
+                        name_w - name_box,
+                        row_height,
+                    ),
+                    OFF_MARKER,
+                    name_font,
+                    Role::Faint,
+                    Align::Left,
+                    false,
+                ));
+            }
         }
 
         let value_w = text_box_width(measure, &reading.value, value_font);
@@ -257,6 +269,40 @@ mod tests {
     }
 
     #[test]
+    fn a_selected_row_marked_off_shows_the_faint_off_after_its_name() {
+        let mut off_row = row("api", Reading::Remaining("18%".into()), Some(0.18), None);
+        off_row.off = true;
+        let cards = vec![card(
+            "cursor",
+            None,
+            "account-5",
+            vec![
+                row("auto", Reading::Remaining("52%".into()), Some(0.52), None),
+                off_row,
+            ],
+        )];
+        let scene = build(&input(&cards), &FakeMeasure);
+        let name = text_of(&scene.content, "api");
+        let off = text_of(&scene.content, " off");
+        assert_eq!(off.color, Role::Faint);
+        assert_eq!(off.rect.x, name.rect.right());
+        // Without the marker there is no `off`.
+        let plain = vec![card(
+            "cursor",
+            None,
+            "account-5",
+            vec![row(
+                "api",
+                Reading::Remaining("18%".into()),
+                Some(0.18),
+                None,
+            )],
+        )];
+        let scene = build(&input(&plain), &FakeMeasure);
+        assert!(!texts(&scene.content).iter().any(|t| t.text == " off"));
+    }
+
+    #[test]
     fn the_bar_has_ten_cells_of_four_by_eight() {
         let cards = sample_cards(1);
         let scene = build(&input(&cards), &FakeMeasure);
@@ -317,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn the_empty_state_is_one_faint_line() {
+    fn the_empty_state_is_one_card_with_a_faint_line_at_the_strip_width() {
         let scene = build(
             &Input {
                 body: Body::Empty,
@@ -327,7 +373,20 @@ mod tests {
         );
         let line = text_of(&scene.content, "No subscription snapshots");
         assert_eq!(line.color, Role::Faint);
-        assert_eq!(scene.content_height, 28.0 + 4.0);
+        assert_eq!(scene.width, 290.0);
+        assert_eq!(scene.card_rects.len(), 1);
+        assert_eq!(scene.card_rects[0].w, 290.0 - 2.0 - 20.0);
+        let frame = scene.content.iter().any(|shape| {
+            matches!(
+                shape,
+                Shape::Rect {
+                    fill: Some(Role::Card),
+                    border: Some((Role::CardBorder, _)),
+                    ..
+                }
+            )
+        });
+        assert!(frame, "the text sits on a card");
     }
 
     #[test]

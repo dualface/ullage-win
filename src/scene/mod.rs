@@ -313,7 +313,6 @@ pub fn build(input: &Input, measure: &dyn Measure) -> Scene {
     let mut body = Content::default();
     match input.body {
         Body::Loading => {}
-        Body::Empty if strip => strip::empty(&mut body, inner_width, scale, measure),
         Body::Empty => cards::empty(&mut body, inner_width, scale, measure),
         Body::Cards(list) if strip => strip::build(&mut body, list, inner_width, scale, measure),
         Body::Cards(list) => {
