@@ -214,6 +214,31 @@ fn ask(
     }
 }
 
+/// Which pairing may still be kept. A pairing takes time, and what the user
+/// does meanwhile can make it stale: forgetting the remote daemon, choosing a
+/// connection, or starting another pairing. A result that comes in after that
+/// belongs to an epoch that is over and is dropped, so that a late success
+/// never writes back a credential the user has just removed.
+#[derive(Debug, Default)]
+pub struct PairingEpoch(u32);
+
+impl PairingEpoch {
+    /// A pairing starts. It is the only one that may be kept.
+    pub fn begin(&mut self) -> u32 {
+        self.invalidate();
+        self.0
+    }
+
+    /// The user did something that makes every pairing on its way stale.
+    pub fn invalidate(&mut self) {
+        self.0 = self.0.wrapping_add(1);
+    }
+
+    pub fn is_current(&self, epoch: u32) -> bool {
+        self.0 == epoch
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApplyError {
     /// The credential could not be stored. Nothing changed.
@@ -382,6 +407,26 @@ mod tests {
                 Err(PairError::Unreachable)
             );
         }
+    }
+
+    #[test]
+    fn a_pairing_may_be_kept_only_until_the_user_does_something_that_makes_it_stale() {
+        let mut epoch = PairingEpoch::default();
+        let first = epoch.begin();
+        assert!(epoch.is_current(first));
+        // Forgetting, or choosing a connection, makes it stale.
+        epoch.invalidate();
+        assert!(!epoch.is_current(first));
+        // So does starting another pairing: only the newest may be kept.
+        let second = epoch.begin();
+        let third = epoch.begin();
+        assert!(!epoch.is_current(second));
+        assert!(epoch.is_current(third));
+        // The count wraps without making an old pairing current again.
+        let mut wrapped = PairingEpoch(u32::MAX);
+        let old = wrapped.0;
+        wrapped.invalidate();
+        assert!(!wrapped.is_current(old));
     }
 
     #[test]

@@ -43,7 +43,9 @@ use crate::menu::{Command, MenuState};
 use crate::placement::{Edges, keep_inside, restore_position, to_px, window_size_px};
 use crate::prefs::{Connection, Prefs, save};
 use crate::remote::address::RemoteAddress;
-use crate::remote::pairing::{self, ApplyError, ForgetError, PairCode, start_pairing};
+use crate::remote::pairing::{
+    self, ApplyError, ForgetError, PairCode, PairingEpoch, start_pairing,
+};
 use crate::remote::store::{Credential, credential_for};
 use crate::scene::{self, Body, Input, Scene, Spot, Target, WORK_AREA_MARGIN};
 use crate::state::{Schedule, State, countdown};
@@ -85,6 +87,8 @@ pub struct App {
     generation: u32,
     pairer: Option<Pairer>,
     pairs: Option<Receiver<PairResult>>,
+    /// Which pairing may still be kept.
+    pairing: PairingEpoch,
     tray_icon: Option<HICON>,
     tray_mode: Mode,
 }
@@ -137,6 +141,7 @@ impl App {
             generation: 0,
             pairer: None,
             pairs: None,
+            pairing: PairingEpoch::default(),
             tray_icon: None,
             tray_mode: registry::system_mode(),
         }
@@ -355,6 +360,10 @@ impl App {
     /// gone, results still on their way from it are dropped, and the new one
     /// is asked at once.
     fn connection_changed(&mut self) {
+        // A pairing that is still on its way was asked for under the old
+        // connection. Its result would write a credential and switch to the
+        // remote daemon, undoing what the user has just done.
+        self.pairing.invalidate();
         self.generation = self.generation.wrapping_add(1);
         self.state = State::Loading;
         self.schedule = Schedule::new(Instant::now());
@@ -711,8 +720,9 @@ impl App {
 
     /// The user agreed to the pairing: ask the daemon, on a thread.
     pub fn begin_pairing(&mut self, address: RemoteAddress, code: PairCode) {
+        let epoch = self.pairing.begin();
         if let Some(pairer) = &self.pairer {
-            pairer.start(address, code);
+            pairer.start(address, code, epoch);
         }
     }
 
@@ -723,6 +733,13 @@ impl App {
         let ended: Vec<PairResult> = results.try_iter().collect();
         let mut dialog = None;
         for ended in ended {
+            // A pairing the user has made stale, by forgetting the remote
+            // daemon or choosing a connection or starting another pairing, is
+            // dropped, whether it worked or not. The daemon may have
+            // registered this device for it: `ullage device list` shows it.
+            if !self.pairing.is_current(ended.epoch) {
+                continue;
+            }
             let address = ended.address;
             dialog = Some(Dialog::Notice(match ended.outcome {
                 Err(error) => format!("Pairing with {address} failed. {error}"),

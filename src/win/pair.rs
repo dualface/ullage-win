@@ -17,6 +17,8 @@ pub const WM_PAIR_DONE: u32 = WM_APP + 3;
 
 pub struct PairResult {
     pub address: RemoteAddress,
+    /// The epoch the pairing was started in; see `PairingEpoch`.
+    pub epoch: u32,
     pub outcome: Result<Token, PairError>,
 }
 
@@ -39,13 +41,18 @@ impl Pairer {
     }
 
     /// Starts one pairing. Its end is a `PairResult` and a `WM_PAIR_DONE`.
-    pub fn start(&self, address: RemoteAddress, code: PairCode) {
+    pub fn start(&self, address: RemoteAddress, code: PairCode, epoch: u32) {
         let results = self.results.clone();
         let target = self.target;
         thread::spawn(move || {
             let name = device_name(std::env::var("COMPUTERNAME").ok().as_deref());
             let outcome = pair(&address, &code, &name);
-            if results.send(PairResult { address, outcome }).is_err() {
+            let ended = PairResult {
+                address,
+                epoch,
+                outcome,
+            };
+            if results.send(ended).is_err() {
                 return;
             }
             post(target, WM_PAIR_DONE);
