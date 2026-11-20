@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! $env:ULLAGE_CONTROL_PIPE = '\\.\pipe\ullage-fake'
-//! cargo run --example fake_daemon -- rich      # or: empty
+//! cargo run --example fake_daemon -- rich      # or: empty, many
 //! ullage-win.exe                               # in another shell, same variable
 //! ```
 
@@ -202,10 +202,18 @@ mod imp {
             if let Some(bytes) = read_request(pipe)
                 && let Ok(request) = serde_json::from_slice::<ControlRequest>(&bytes)
             {
-                let snapshots = if scenario == "empty" {
-                    Vec::new()
-                } else {
-                    rich(Utc::now())
+                let snapshots = match scenario.as_str() {
+                    "empty" => Vec::new(),
+                    // Enough accounts to fill a tall screen.
+                    "many" => (0..4)
+                        .flat_map(|copy| {
+                            rich(Utc::now()).into_iter().map(move |mut snapshot| {
+                                snapshot.account_id = format!("{}-{copy}", snapshot.account_id);
+                                snapshot
+                            })
+                        })
+                        .collect(),
+                    _ => rich(Utc::now()),
                 };
                 let mut response =
                     ControlResponse::new(&request.request_id, ControlResult::Snapshots(snapshots));
