@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["dualface <dualface@gmail.com>"]
-rust-version = "1.85"
+rust-version = "1.88"
 publish = false
 description = "A floating Windows window that shows ullage subscription usage"
 

@@ -107,7 +107,8 @@ pub fn make_icon(factory: &ID2D1Factory, text: Rc<Typography>, mode: Mode) -> Re
         let _ = GdiFlush();
 
         // Direct2D wrote premultiplied pixels; an icon wants straight alpha.
-        for pixel in surface.pixels_mut().chunks_exact_mut(4) {
+        let (pixels, _) = surface.pixels_mut().as_chunks_mut::<4>();
+        for pixel in pixels {
             let alpha = u32::from(pixel[3]);
             if alpha != 0 && alpha != 255 {
                 for channel in &mut pixel[..3] {

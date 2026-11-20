@@ -16,8 +16,8 @@ drawn as a modern Windows window instead of a terminal screen.
 
 ## Requirements
 
-- Windows 10 or 11 on x86-64. The rounded corners are a Windows 11 feature; on
-  Windows 10 the window has square corners.
+- Windows 10 or 11 on x86-64. The window draws its own rounded corners and its
+  own shadow, so it looks the same on both.
 - The ullage daemon, installed and running. This app does not install, start
   or stop it. Install ullage first (see the
   [ullage README](https://github.com/dualface/ullage-cli#readme)), then run
@@ -59,8 +59,8 @@ Window` Run value, whether or not it was set at install time. It keeps
 
 ## Build
 
-You need the stable Rust toolchain for the `x86_64-pc-windows-msvc` target and
-the Visual Studio C++ build tools.
+You need Rust 1.88 or newer (the version in `rust-version` in `Cargo.toml`)
+with the `x86_64-pc-windows-msvc` target, and the Visual Studio C++ build tools.
 
 ```text
 cargo build --release
