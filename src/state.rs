@@ -88,7 +88,9 @@ pub fn failure_for_kind(kind: &FailureKind, remote: Option<&RemoteAddress>) -> F
         },
         (FailureKind::TokenRejected, _) => Failure {
             title: "Remote daemon rejected this device".into(),
-            body: "The device token is no longer valid. Pair this device again.".into(),
+            body: "The device token is no longer valid. Pair this device again. Run the \
+                   command on the host that runs the daemon."
+                .into(),
             command: "ullage device pair",
         },
         (FailureKind::Fetch(FetchError::DaemonUnavailable), Some(address)) => Failure {
@@ -98,7 +100,16 @@ pub fn failure_for_kind(kind: &FailureKind, remote: Option<&RemoteAddress>) -> F
                 .into(),
             command: "ullage daemon status",
         },
-        (FailureKind::Fetch(error), _) => failure_for(error),
+        // The commands of the local words are for the host that runs the
+        // daemon, which is not this one.
+        (FailureKind::Fetch(error), Some(address)) => {
+            let mut failure = failure_for(error);
+            failure.body.push_str(&format!(
+                " Run the command on the host that runs the daemon ({address})."
+            ));
+            failure
+        }
+        (FailureKind::Fetch(error), None) => failure_for(error),
     }
 }
 
@@ -123,6 +134,11 @@ impl State {
     ) -> State {
         match result {
             Ok(fetch) => State::Ready(fetch.snapshots),
+            // What the user has to do about these is not shown by old data:
+            // they are told even when there is some.
+            Err(kind @ (FailureKind::NotPaired | FailureKind::TokenRejected)) => {
+                State::Unavailable(failure_for_kind(&kind, remote))
+            }
             Err(kind) => match self {
                 State::Ready(snapshots) | State::Stalled(snapshots) => State::Stalled(snapshots),
                 State::Loading | State::Unavailable(_) => {
@@ -387,9 +403,16 @@ mod tests {
             FetchError::InvalidResponse,
             FetchError::Daemon(Box::new(ControlResult::Snapshots(Vec::new()))),
         ] {
-            assert_eq!(
-                failure_for_kind(&FailureKind::Fetch(error.clone()), Some(&address)),
-                failure_for(&error)
+            let local = failure_for(&error);
+            let remote = failure_for_kind(&FailureKind::Fetch(error.clone()), Some(&address));
+            assert_eq!(remote.title, local.title);
+            assert_eq!(remote.command, local.command);
+            // The command is for the host of the daemon, and the words say so.
+            assert!(remote.body.starts_with(&local.body));
+            assert!(
+                remote
+                    .body
+                    .contains("host that runs the daemon (100.71.140.68:7878)")
             );
         }
         // Without an address the local words are used, whatever the kind.
@@ -397,6 +420,32 @@ mod tests {
             failure_for_kind(&FailureKind::Fetch(FetchError::DaemonUnavailable), None),
             failure_for(&FetchError::DaemonUnavailable)
         );
+    }
+
+    #[test]
+    fn a_remote_that_asks_for_pairing_is_told_even_when_there_is_data() {
+        let address = remote();
+        for kind in [FailureKind::NotPaired, FailureKind::TokenRejected] {
+            let ready = State::Ready(fetch(2).snapshots);
+            assert_eq!(
+                ready.after_fetch(Err(kind.clone()), Some(&address)),
+                State::Unavailable(failure_for_kind(&kind, Some(&address)))
+            );
+            let stalled = State::Stalled(fetch(2).snapshots);
+            assert!(matches!(
+                stalled.after_fetch(Err(kind), Some(&address)),
+                State::Unavailable(_)
+            ));
+        }
+        // Other failures still keep the data.
+        let ready = State::Ready(fetch(2).snapshots);
+        assert!(matches!(
+            ready.after_fetch(
+                Err(FailureKind::Fetch(FetchError::DaemonUnavailable)),
+                Some(&address)
+            ),
+            State::Stalled(_)
+        ));
     }
 
     #[test]

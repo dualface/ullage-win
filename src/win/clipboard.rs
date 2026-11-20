@@ -28,16 +28,23 @@ pub fn get_text(owner: HWND) -> Option<String> {
         let text = (|| {
             let handle = GetClipboardData(UNICODE_TEXT).ok()?;
             let memory = HGLOBAL(handle.0);
-            let units = (GlobalSize(memory) / size_of::<u16>()).min(MAX_READ_UNITS);
+            let held = GlobalSize(memory) / size_of::<u16>();
+            let units = held.min(MAX_READ_UNITS);
             let source = GlobalLock(memory).cast::<u16>();
             if source.is_null() {
                 return None;
             }
             let all = std::slice::from_raw_parts(source, units);
-            let end = all.iter().position(|unit| *unit == 0).unwrap_or(units);
-            let text = String::from_utf16_lossy(&all[..end]);
+            // Text that goes on past what is read is not read at all: its
+            // front part could pass for a complete input.
+            let text = match all.iter().position(|unit| *unit == 0) {
+                Some(end) => Some(String::from_utf16_lossy(&all[..end])),
+                None if held > units => None,
+                None => Some(String::from_utf16_lossy(all)),
+            };
+            // The text is copied: the memory may be let go of now.
             let _ = GlobalUnlock(memory);
-            Some(text)
+            text
         })();
         let _ = CloseClipboard();
         text

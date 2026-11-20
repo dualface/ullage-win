@@ -103,8 +103,11 @@ pub struct MenuState {
     /// Whether the global shortcut is registered.
     pub shortcut: bool,
     pub connection: Connection,
-    /// The remote daemon this device is paired with, if any.
+    /// The remote daemon the settings name, if any.
     pub remote: Option<RemoteAddress>,
+    /// Whether a token is saved for that address: only then can the remote
+    /// daemon be chosen.
+    pub remote_paired: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,7 +150,6 @@ fn connection_menu(state: &MenuState) -> Item {
         Some(address) => format!("Remote daemon ({address}) (plaintext)"),
         None => "Remote daemon".to_owned(),
     };
-    let paired = state.remote.is_some();
     Item::Submenu {
         label: "Connection".to_owned(),
         right: None,
@@ -162,7 +164,7 @@ fn connection_menu(state: &MenuState) -> Item {
                 label: remote_label,
                 right: None,
                 checked: state.connection == Connection::Remote,
-                enabled: paired,
+                enabled: state.remote_paired,
             },
             Item::Separator,
             command(
@@ -175,7 +177,8 @@ fn connection_menu(state: &MenuState) -> Item {
                 label: "Forget remote daemon".to_owned(),
                 right: None,
                 checked: false,
-                enabled: paired,
+                // An address without a token can still be forgotten.
+                enabled: state.remote.is_some(),
             },
         ],
     }
@@ -283,6 +286,7 @@ mod tests {
             shortcut: true,
             connection: Connection::Local,
             remote: None,
+            remote_paired: false,
         }
     }
 
@@ -451,12 +455,24 @@ mod tests {
     fn a_paired_remote_daemon_shows_its_address_and_can_be_chosen_or_forgotten() {
         let mut state = state();
         state.remote = RemoteAddress::parse("100.71.140.68:7878").ok();
+        state.remote_paired = true;
         state.connection = Connection::Remote;
         let items = connection_items(&state);
         assert_eq!(label(&items[1]), "Remote daemon (100.71.140.68:7878)");
         assert!(!checked(&items[0]));
         assert!(checked(&items[1]));
         assert!(enabled(&items[1]));
+        assert!(enabled(&items[4]));
+    }
+
+    #[test]
+    fn an_address_without_a_token_cannot_be_chosen_but_can_be_forgotten() {
+        let mut state = state();
+        state.remote = RemoteAddress::parse("100.71.140.68:7878").ok();
+        state.remote_paired = false;
+        let items = connection_items(&state);
+        assert_eq!(label(&items[1]), "Remote daemon (100.71.140.68:7878)");
+        assert!(!enabled(&items[1]));
         assert!(enabled(&items[4]));
     }
 

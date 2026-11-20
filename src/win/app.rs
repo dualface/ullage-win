@@ -1,5 +1,6 @@
 //! The state of the running window and what it does about each event.
 
+use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
@@ -581,6 +582,7 @@ impl App {
             shortcut: self.shortcut,
             connection: self.prefs.connection,
             remote: self.prefs.remote_address,
+            remote_paired: self.remote_paired(),
         }
     }
 
@@ -628,7 +630,7 @@ impl App {
                 self.save_prefs();
                 self.redraw();
             }
-            Command::SetConnection(connection) => self.set_connection(connection),
+            Command::SetConnection(connection) => dialog = self.set_connection(connection),
             Command::PairFromClipboard => dialog = self.pair_from_clipboard(),
             Command::ForgetRemote => dialog = self.forget_remote(),
             Command::Refresh => self.refresh_now(),
@@ -640,14 +642,45 @@ impl App {
         dialog
     }
 
-    fn set_connection(&mut self, connection: Connection) {
-        let possible = connection == Connection::Local || self.prefs.remote_address.is_some();
-        if !possible || connection == self.prefs.connection {
-            return;
+    /// Whether a token is saved for the address of the settings. It is the
+    /// same test a fetch makes before it sends anything.
+    fn remote_paired(&self) -> bool {
+        match (self.prefs.remote_address, CredStore.load()) {
+            (Some(address), Ok(Some(credential))) => credential.address == address,
+            _ => false,
         }
-        self.prefs.connection = connection;
-        self.save_prefs();
+    }
+
+    /// Saves `next` as the settings. The caller makes it the settings in
+    /// memory only when this worked, so a change is never shown that the next
+    /// start would not have.
+    fn persist(&self, next: &Prefs) -> io::Result<()> {
+        match &self.prefs_path {
+            Some(path) => save(path, next),
+            None => Err(io::Error::other("there is no settings file")),
+        }
+    }
+
+    fn set_connection(&mut self, connection: Connection) -> Option<Dialog> {
+        if connection == self.prefs.connection {
+            return None;
+        }
+        if connection == Connection::Remote && !self.remote_paired() {
+            return Some(Dialog::Notice(
+                "This device is not paired with a remote daemon. Choose Pair from clipboard."
+                    .into(),
+            ));
+        }
+        let mut next = self.prefs.clone();
+        next.connection = connection;
+        if self.persist(&next).is_err() {
+            return Some(Dialog::Notice(
+                "The settings could not be saved. The connection was not changed.".into(),
+            ));
+        }
+        self.prefs = next;
         self.connection_changed();
+        None
     }
 
     /// Reads `<ip>:<port> <code>` from the clipboard. What it holds is not
@@ -702,7 +735,9 @@ impl App {
                     let path = self.prefs_path.clone();
                     let kept = pairing::apply(&CredStore, &credential, || match &path {
                         Some(path) => save(path, &next),
-                        None => Ok(()),
+                        // Without a place for the settings, the pairing would
+                        // be gone at the next start: it is not made.
+                        None => Err(io::Error::other("there is no settings file")),
                     });
                     match kept {
                         Ok(()) => {
@@ -718,6 +753,11 @@ impl App {
                             "Pairing with {address} worked, but the settings could not be \
                              saved. Nothing was changed."
                         ),
+                        Err(ApplyError::Rollback) => format!(
+                            "Pairing with {address} worked, but the settings could not be \
+                             saved, and an earlier pairing could not be put back. Pair again \
+                             with Pair from clipboard."
+                        ),
                     }
                 }
             }));
@@ -727,6 +767,7 @@ impl App {
 
     /// Deletes the token and the address, and goes back to the local daemon.
     fn forget_remote(&mut self) -> Option<Dialog> {
+        let before = CredStore.load().ok().flatten();
         if CredStore.delete().is_err() {
             return Some(Dialog::Notice(
                 "The device token could not be removed from the Windows Credential Manager. \
@@ -734,9 +775,21 @@ impl App {
                     .into(),
             ));
         }
-        self.prefs.connection = Connection::Local;
-        self.prefs.remote_address = None;
-        self.save_prefs();
+        let mut next = self.prefs.clone();
+        next.connection = Connection::Local;
+        next.remote_address = None;
+        if self.persist(&next).is_err() {
+            // The settings still name the daemon: the token goes back.
+            let restored = before.is_none_or(|credential| CredStore.save(&credential).is_ok());
+            return Some(Dialog::Notice(if restored {
+                "The settings could not be saved. Nothing was changed.".into()
+            } else {
+                "The settings could not be saved, and the device token could not be put back. \
+                 Pair again with Pair from clipboard."
+                    .into()
+            }));
+        }
+        self.prefs = next;
         self.connection_changed();
         None
     }

@@ -5,10 +5,11 @@ use std::thread;
 
 use ullage_cli::SystemClient;
 use ullage_cli::usage_view::{UsageFetch, fetch_usage};
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::WM_APP;
 
 use super::credstore::CredStore;
+use super::util::post;
 use crate::remote::address::RemoteAddress;
 use crate::remote::fetch::fetch_remote;
 use crate::state::FailureKind;
@@ -74,14 +75,7 @@ impl Fetcher {
             {
                 return;
             }
-            unsafe {
-                let _ = PostMessageW(
-                    Some(HWND(target as *mut _)),
-                    WM_FETCH_DONE,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
-            }
+            post(target, WM_FETCH_DONE);
         });
     }
 }

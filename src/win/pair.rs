@@ -4,9 +4,10 @@
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::WM_APP;
 
+use super::util::post;
 use crate::remote::address::RemoteAddress;
 use crate::remote::pairing::{PairCode, PairError, device_name, pair};
 use crate::remote::store::Token;
@@ -47,14 +48,7 @@ impl Pairer {
             if results.send(PairResult { address, outcome }).is_err() {
                 return;
             }
-            unsafe {
-                let _ = PostMessageW(
-                    Some(HWND(target as *mut _)),
-                    WM_PAIR_DONE,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
-            }
+            post(target, WM_PAIR_DONE);
         });
     }
 }

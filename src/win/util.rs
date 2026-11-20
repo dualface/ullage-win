@@ -1,6 +1,16 @@
 //! Small helpers shared by the Windows modules.
 
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows::core::PCWSTR;
+
+/// Posts `message` to the window whose handle value is `target`. A raw
+/// handle value can cross threads; an `HWND` cannot.
+pub fn post(target: isize, message: u32) {
+    unsafe {
+        let _ = PostMessageW(Some(HWND(target as *mut _)), message, WPARAM(0), LPARAM(0));
+    }
+}
 
 /// UTF-16 with a closing NUL, for the wide Win32 functions.
 pub fn wide(text: &str) -> Vec<u16> {
