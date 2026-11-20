@@ -90,11 +90,17 @@ pub fn serve(replies: Vec<Reply>) -> Server {
             let mut stream = match listener.accept() {
                 Ok((stream, _)) => stream,
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                    if stopped.load(Ordering::SeqCst) {
-                        break;
+                    if !stopped.load(Ordering::SeqCst) {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
                     }
-                    thread::sleep(Duration::from_millis(5));
-                    continue;
+                    // The stop may have come after the accept above found
+                    // nothing, with a client connecting in between: what is
+                    // queued is counted before the server ends.
+                    match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(_) => break,
+                    }
                 }
                 Err(_) => break,
             };
@@ -170,8 +176,8 @@ mod tests {
 
     #[test]
     fn a_connection_is_counted_whatever_it_sends() {
-        // The watch must see a connection that sends nothing, one that sends
-        // part of a request, and one that sends all of it.
+        // The count must include a connection that sends nothing and one that
+        // sends only part of a request headers: neither makes a `Seen`.
         let server = serve(vec![Reply::Raw(ok(b"{}"))]);
         drop(TcpStream::connect(server.address.socket_addr()).unwrap());
         let mut partial = TcpStream::connect(server.address.socket_addr()).unwrap();
@@ -180,6 +186,22 @@ mod tests {
         let (seen, accepted) = server.finish_after(Duration::from_millis(200));
         assert!(seen.is_empty());
         assert_eq!(accepted, 2);
+    }
+
+    #[test]
+    fn a_connection_that_is_queued_when_the_server_is_stopped_is_still_counted() {
+        // The client is connected (the system has queued it) before the stop
+        // is asked for, with no wait in between: the stop must not make the
+        // server end without counting it.
+        for _ in 0..20 {
+            let server = serve(vec![Reply::Raw(ok(b"{}"))]);
+            // Connected and closed at once, so that the server does not wait
+            // for a request that never comes.
+            drop(TcpStream::connect(server.address.socket_addr()).unwrap());
+            let (seen, accepted) = server.finish_after(Duration::ZERO);
+            assert!(seen.is_empty());
+            assert_eq!(accepted, 1);
+        }
     }
 
     #[test]

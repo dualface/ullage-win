@@ -7,7 +7,7 @@
 //! `ControlResponse` the control socket would have given.
 
 use std::cell::Cell;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Deserialize;
 use ullage_cli::{ClientError, ControlClient};
@@ -16,7 +16,7 @@ use ullage_protocol::{
 };
 
 use super::address::RemoteAddress;
-use super::http::{self, HttpError, Request};
+use super::http::{self, Deadline, HttpError, Request};
 use super::store::Token;
 
 /// The longest one fetch may take, from connecting to the last byte.
@@ -25,14 +25,17 @@ pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct HttpClient {
     address: RemoteAddress,
     token: Token,
+    /// The limit of the whole fetch this client is made for.
+    deadline: Deadline,
     rejected: Cell<bool>,
 }
 
 impl HttpClient {
-    pub fn new(address: RemoteAddress, token: Token) -> Self {
+    pub fn new(address: RemoteAddress, token: Token, deadline: Deadline) -> Self {
         Self {
             address,
             token,
+            deadline,
             rejected: Cell::new(false),
         }
     }
@@ -47,11 +50,19 @@ impl HttpClient {
 
 impl ControlClient for HttpClient {
     fn send(&self, request: &ControlRequest) -> Result<ControlResponse, ClientError> {
+        // Every way out passes the deadline: an answer, or an error, that is
+        // ready only after it is a timeout.
+        self.deadline
+            .judge(self.exchange(request), ClientError::DaemonUnavailable)
+    }
+}
+
+impl HttpClient {
+    fn exchange(&self, request: &ControlRequest) -> Result<ControlResponse, ClientError> {
         // The only request the HTTP API answers the way the window needs it.
         if !matches!(request.command, ControlCommand::Show { account_id: None }) {
             return Err(ClientError::InvalidResponse);
         }
-        let started = Instant::now();
         let authorization = format!("Bearer {}", self.token.expose());
         let answer = http::send(
             &self.address,
@@ -61,16 +72,12 @@ impl ControlClient for HttpClient {
                 headers: &[("Authorization", &authorization)],
                 body: None,
             },
-            FETCH_TIMEOUT,
+            &self.deadline,
         )
         .map_err(|error| match error {
             HttpError::Unreachable | HttpError::TimedOut => ClientError::DaemonUnavailable,
             HttpError::Invalid | HttpError::TooLarge => ClientError::InvalidResponse,
         })?;
-        // The reading of the answer is inside the limit too.
-        if started.elapsed() > FETCH_TIMEOUT {
-            return Err(ClientError::DaemonUnavailable);
-        }
         match map_response(answer.status, &answer.body, &request.request_id) {
             Mapped::Response(response) => Ok(*response),
             Mapped::Rejected => {
@@ -306,7 +313,11 @@ mod tests {
     }
 
     fn client(server: &super::super::testserver::Server) -> HttpClient {
-        HttpClient::new(server.address, Token::parse(TOKEN).unwrap())
+        HttpClient::new(
+            server.address,
+            Token::parse(TOKEN).unwrap(),
+            Deadline::after(Duration::from_secs(5)),
+        )
     }
 
     #[test]
@@ -360,6 +371,26 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_or_an_error_that_is_ready_after_the_deadline_is_a_timeout() {
+        for reply in [
+            ok(&snapshots_body("http-1")),
+            reply("401 Unauthorized", &[], b"{}"),
+            ok(b"not json"),
+        ] {
+            let server = serve(vec![Reply::Raw(reply)]);
+            let late = HttpClient::new(
+                server.address,
+                Token::parse(TOKEN).unwrap(),
+                Deadline::late_after(Duration::from_secs(5)),
+            );
+            assert!(matches!(
+                late.send(&show_all()),
+                Err(ClientError::DaemonUnavailable)
+            ));
+        }
+    }
+
+    #[test]
     fn a_daemon_that_does_not_answer_is_unavailable() {
         let server = serve(vec![Reply::Raw(Vec::new())]);
         let client = client(&server);
@@ -374,7 +405,11 @@ mod tests {
             drop(listener);
             address.unwrap()
         };
-        let refused = HttpClient::new(address, Token::parse(TOKEN).unwrap());
+        let refused = HttpClient::new(
+            address,
+            Token::parse(TOKEN).unwrap(),
+            Deadline::after(Duration::from_secs(5)),
+        );
         assert!(matches!(
             refused.send(&show_all()),
             Err(ClientError::DaemonUnavailable)

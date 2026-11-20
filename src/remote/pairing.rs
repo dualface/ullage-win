@@ -6,12 +6,12 @@
 //! together, so that they never get out of step.
 
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Deserialize;
 
 use super::address::{AddressError, RemoteAddress};
-use super::http::{self, HttpError, Request};
+use super::http::{self, Deadline, HttpError, Request};
 use super::store::{Credential, StoreError, Token, TokenStore};
 
 /// The longest a pairing request may take. A fetch has its own limit.
@@ -77,6 +77,42 @@ pub fn parse_clipboard(text: &str) -> Result<(RemoteAddress, PairCode), Clipboar
     Ok((address, code))
 }
 
+/// Why a pairing is not started from what is on the clipboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    Clipboard(ClipboardError),
+    /// The clipboard is fine, but there is no place to save the settings, so
+    /// the pairing could not be kept: it would still use up the code and
+    /// register this device at the daemon.
+    NoSettings,
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Refusal::Clipboard(error) => error.fmt(f),
+            Refusal::NoSettings => {
+                f.write_str("There is no place to save the settings, so no pairing was started.")
+            }
+        }
+    }
+}
+
+/// What may be paired with. The clipboard is read first, so that its error is
+/// the one the user sees; a good clipboard is then refused when the pairing
+/// could not be kept.
+pub fn start_pairing(
+    clipboard: &str,
+    can_save_settings: bool,
+) -> Result<(RemoteAddress, PairCode), Refusal> {
+    let (address, code) = parse_clipboard(clipboard).map_err(Refusal::Clipboard)?;
+    if can_save_settings {
+        Ok((address, code))
+    } else {
+        Err(Refusal::NoSettings)
+    }
+}
+
 /// The name this device gives itself: the computer's name, reduced to what
 /// the daemon takes, or a fixed name when nothing is left.
 pub fn device_name(computer_name: Option<&str>) -> String {
@@ -130,7 +166,28 @@ pub fn pair(
     code: &PairCode,
     device_name: &str,
 ) -> Result<Token, PairError> {
-    let started = Instant::now();
+    pair_by(address, code, device_name, Deadline::after(PAIR_TIMEOUT))
+}
+
+/// [`pair`] with the deadline of the whole pairing: it covers the request,
+/// the answer and the reading of the token, and it is the last word. A token
+/// that is ready only after it is not given.
+fn pair_by(
+    address: &RemoteAddress,
+    code: &PairCode,
+    device_name: &str,
+    deadline: Deadline,
+) -> Result<Token, PairError> {
+    let result = ask(address, code, device_name, &deadline);
+    deadline.judge(result, PairError::Unreachable)
+}
+
+fn ask(
+    address: &RemoteAddress,
+    code: &PairCode,
+    device_name: &str,
+    deadline: &Deadline,
+) -> Result<Token, PairError> {
     let body = serde_json::json!({ "pair_code": code.0, "device_name": device_name }).to_string();
     let answer = http::send(
         address,
@@ -140,16 +197,12 @@ pub fn pair(
             headers: &[("Content-Type", "application/json")],
             body: Some(body.as_bytes()),
         },
-        PAIR_TIMEOUT,
+        deadline,
     )
     .map_err(|error| match error {
         HttpError::Unreachable | HttpError::TimedOut => PairError::Unreachable,
         HttpError::Invalid | HttpError::TooLarge => PairError::Failed,
     })?;
-    // One limit for the whole pairing, the reading of the answer included.
-    if started.elapsed() > PAIR_TIMEOUT {
-        return Err(PairError::Unreachable);
-    }
     match answer.status {
         200 => serde_json::from_slice::<PairReply>(&answer.body)
             .ok()
@@ -294,6 +347,41 @@ mod tests {
             );
         }
         assert!(parse_clipboard(&format!("100.71.140.68:7878 {}", "A".repeat(16))).is_ok());
+    }
+
+    #[test]
+    fn a_bad_clipboard_is_told_before_the_missing_settings() {
+        for text in ["", "100.71.140.68:7878", "8.8.8.8:7878 ABC-DEF"] {
+            let refused = start_pairing(text, false).unwrap_err();
+            assert!(matches!(refused, Refusal::Clipboard(_)), "{text:?}");
+            assert_eq!(refused, start_pairing(text, true).unwrap_err());
+        }
+    }
+
+    #[test]
+    fn a_good_clipboard_starts_a_pairing_only_with_a_place_for_the_settings() {
+        let text = "100.71.140.68:7878 ABC-DEF";
+        assert_eq!(start_pairing(text, false).unwrap_err(), Refusal::NoSettings);
+        let (address, _) = start_pairing(text, true).unwrap();
+        assert_eq!(address, self::address());
+    }
+
+    #[test]
+    fn a_token_that_is_ready_after_the_deadline_is_not_given() {
+        let body = format!("{{\"device_token\":\"{}\"}}", "A".repeat(43));
+        for reply in [
+            super::super::testserver::ok(body.as_bytes()),
+            reply("401 Unauthorized", &[], b"{}"),
+            reply("500 Internal Server Error", &[], b"{}"),
+        ] {
+            let server = serve(vec![Reply::Raw(reply)]);
+            let (_, code) = parse_clipboard(&format!("{} ABC-DEF", server.address)).unwrap();
+            let late = Deadline::late_after(Duration::from_secs(5));
+            assert_eq!(
+                pair_by(&server.address, &code, "FLY", late),
+                Err(PairError::Unreachable)
+            );
+        }
     }
 
     #[test]

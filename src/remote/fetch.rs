@@ -1,12 +1,11 @@
 //! One fetch from a remote daemon: the saved credential, the client, and
 //! `fetch_usage` of `ullage-cli`.
 
-use std::time::Instant;
-
 use ullage_cli::usage_view::{FetchError, UsageFetch, fetch_usage};
 
 use super::address::RemoteAddress;
 use super::client::{FETCH_TIMEOUT, HttpClient};
+use super::http::Deadline;
 use super::store::{TokenStore, credential_for};
 use crate::state::FailureKind;
 
@@ -17,25 +16,31 @@ pub fn fetch_remote(
     store: &dyn TokenStore,
     address: &RemoteAddress,
 ) -> Result<UsageFetch, FailureKind> {
+    fetch_remote_by(store, address, Deadline::after(FETCH_TIMEOUT))
+}
+
+/// [`fetch_remote`] with the deadline of the whole fetch. It is passed to
+/// the client, so that the transport, the reading of the answer, and the
+/// checks of `fetch_usage` all share it, and it is the last word: a result
+/// that is ready only after it, a fetch or an error, is a timeout.
+fn fetch_remote_by(
+    store: &dyn TokenStore,
+    address: &RemoteAddress,
+    deadline: Deadline,
+) -> Result<UsageFetch, FailureKind> {
     let Some(credential) = credential_for(store, address) else {
         return Err(FailureKind::NotPaired);
     };
-    let started = Instant::now();
-    let client = HttpClient::new(*address, credential.token);
-    let fetched = fetch_usage(&client).map_err(|error| {
+    let client = HttpClient::new(*address, credential.token, deadline);
+    let result = fetch_usage(&client).map_err(|error| {
         // `ClientError` has no word for a refused token: the client noted it.
         if error == FetchError::InvalidResponse && client.was_rejected() {
             FailureKind::TokenRejected
         } else {
             FailureKind::Fetch(error)
         }
-    })?;
-    // One limit for the whole fetch, the checks of `fetch_usage` included:
-    // a result that arrives after it is dropped.
-    if started.elapsed() > FETCH_TIMEOUT {
-        return Err(FailureKind::Fetch(FetchError::DaemonUnavailable));
-    }
-    Ok(fetched)
+    });
+    deadline.judge(result, FailureKind::Fetch(FetchError::DaemonUnavailable))
 }
 
 #[cfg(test)]
@@ -137,6 +142,23 @@ mod tests {
             fetch_remote(&store_for(gone), &gone).unwrap_err(),
             FailureKind::Fetch(FetchError::DaemonUnavailable)
         );
+    }
+
+    #[test]
+    fn a_fetch_that_is_ready_only_after_the_deadline_is_a_timeout_whatever_it_is() {
+        let late = || Deadline::late_after(Duration::from_secs(5));
+        let gone = FailureKind::Fetch(FetchError::DaemonUnavailable);
+        for reply in [
+            ok(&body(ControlResult::Snapshots(Vec::new()))),
+            reply("401 Unauthorized", &[], b"{}"),
+            ok(b"not json"),
+        ] {
+            let server = serve(vec![Reply::Raw(reply)]);
+            assert_eq!(
+                fetch_remote_by(&store_for(server.address), &server.address, late()).unwrap_err(),
+                gone
+            );
+        }
     }
 
     #[test]

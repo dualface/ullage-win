@@ -44,15 +44,71 @@ pub enum HttpError {
     TooLarge,
 }
 
-/// Sends `request` to `address`, and reads the answer, within `timeout`.
+/// The point in time by which an operation must be over, from its start to
+/// its final result. One is made at the entry of a fetch or a pairing, and
+/// passed down, so that the connection, the request, the answer, and the
+/// checks after it all share the same limit.
+#[derive(Clone, Copy, Debug)]
+pub struct Deadline {
+    end: Instant,
+    /// For tests: the deadline passes only after the network is done.
+    #[cfg(test)]
+    late: bool,
+}
+
+impl Deadline {
+    pub fn after(limit: Duration) -> Self {
+        Self {
+            end: Instant::now() + limit,
+            #[cfg(test)]
+            late: false,
+        }
+    }
+
+    /// A deadline whose network time is `limit`, and which is over by the
+    /// time the result is judged: it stands for an answer that came in time
+    /// and was processed too late.
+    #[cfg(test)]
+    pub fn late_after(limit: Duration) -> Self {
+        Self {
+            end: Instant::now() + limit,
+            late: true,
+        }
+    }
+
+    /// What is left, or a timeout when nothing is.
+    pub fn remaining(&self) -> Result<Duration, HttpError> {
+        let left = self.end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            Err(HttpError::TimedOut)
+        } else {
+            Ok(left)
+        }
+    }
+
+    fn passed(&self) -> bool {
+        #[cfg(test)]
+        if self.late {
+            return true;
+        }
+        Instant::now() >= self.end
+    }
+
+    /// The final word on an operation: a result that comes after the
+    /// deadline, a success or a failure, is `late` instead.
+    pub fn judge<T, E>(&self, result: Result<T, E>, late: E) -> Result<T, E> {
+        if self.passed() { Err(late) } else { result }
+    }
+}
+
+/// Sends `request` to `address`, and reads the answer, within `deadline`.
 pub fn send(
     address: &RemoteAddress,
     request: &Request<'_>,
-    timeout: Duration,
+    deadline: &Deadline,
 ) -> Result<Response, HttpError> {
     let head = build_head(address, request)?;
-    let deadline = Instant::now() + timeout;
-    let mut stream = TcpStream::connect_timeout(&address.socket_addr(), remaining(deadline)?)
+    let mut stream = TcpStream::connect_timeout(&address.socket_addr(), deadline.remaining()?)
         .map_err(io_error)?;
     write_all(&mut stream, &head, deadline)?;
     if let Some(body) = request.body {
@@ -60,16 +116,16 @@ pub fn send(
     }
     let response = read_response(&mut stream, deadline)?;
     // An answer that completed at the deadline is too late.
-    remaining(deadline)?;
+    deadline.remaining()?;
     Ok(response)
 }
 
 /// Writes all of `bytes`. Each write is given what is left of the deadline.
-fn write_all(stream: &mut TcpStream, bytes: &[u8], deadline: Instant) -> Result<(), HttpError> {
+fn write_all(stream: &mut TcpStream, bytes: &[u8], deadline: &Deadline) -> Result<(), HttpError> {
     let mut rest = bytes;
     while !rest.is_empty() {
         stream
-            .set_write_timeout(Some(remaining(deadline)?))
+            .set_write_timeout(Some(deadline.remaining()?))
             .map_err(io_error)?;
         let count = stream.write(rest).map_err(io_error)?;
         if count == 0 {
@@ -78,15 +134,6 @@ fn write_all(stream: &mut TcpStream, bytes: &[u8], deadline: Instant) -> Result<
         rest = &rest[count..];
     }
     Ok(())
-}
-
-fn remaining(deadline: Instant) -> Result<Duration, HttpError> {
-    let left = deadline.saturating_duration_since(Instant::now());
-    if left.is_zero() {
-        Err(HttpError::TimedOut)
-    } else {
-        Ok(left)
-    }
 }
 
 fn io_error(error: io::Error) -> HttpError {
@@ -135,10 +182,10 @@ fn build_head(address: &RemoteAddress, request: &Request<'_>) -> Result<Vec<u8>,
 fn read_some(
     stream: &mut TcpStream,
     chunk: &mut [u8],
-    deadline: Instant,
+    deadline: &Deadline,
 ) -> Result<usize, HttpError> {
     stream
-        .set_read_timeout(Some(remaining(deadline)?))
+        .set_read_timeout(Some(deadline.remaining()?))
         .map_err(io_error)?;
     stream.read(chunk).map_err(io_error)
 }
@@ -149,7 +196,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn read_response(stream: &mut TcpStream, deadline: Instant) -> Result<Response, HttpError> {
+fn read_response(stream: &mut TcpStream, deadline: &Deadline) -> Result<Response, HttpError> {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 8192];
     let head_end = loop {
@@ -260,7 +307,7 @@ mod tests {
     #[test]
     fn a_get_sends_the_host_and_the_headers_it_was_given() {
         let server = serve(vec![Reply::Raw(ok(b"{}"))]);
-        let response = send(&server.address, &get("/v1/usage"), WAIT).unwrap();
+        let response = send(&server.address, &get("/v1/usage"), &Deadline::after(WAIT)).unwrap();
         assert_eq!(
             response,
             Response {
@@ -286,7 +333,7 @@ mod tests {
             headers: &[("Content-Type", "application/json")],
             body: Some(b"{\"a\":1}"),
         };
-        send(&server.address, &request, WAIT).unwrap();
+        send(&server.address, &request, &Deadline::after(WAIT)).unwrap();
         let seen = server.finish();
         assert!(seen[0].head.contains("Content-Length: 7\r\n"));
         assert!(seen[0].head.contains("Content-Type: application/json\r\n"));
@@ -298,7 +345,7 @@ mod tests {
         let server = serve(vec![Reply::Raw(
             b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello".to_vec(),
         )]);
-        let response = send(&server.address, &get("/x"), WAIT).unwrap();
+        let response = send(&server.address, &get("/x"), &Deadline::after(WAIT)).unwrap();
         assert_eq!(response.body, b"hello");
     }
 
@@ -311,7 +358,7 @@ mod tests {
             Reply::Raw(reply("302 Found", &[("Location", &location)], b"")),
             Reply::Raw(ok(b"must not be asked for either")),
         ]);
-        let response = send(&server.address, &get("/x"), WAIT).unwrap();
+        let response = send(&server.address, &get("/x"), &Deadline::after(WAIT)).unwrap();
         assert_eq!(response.status, 302);
         assert_eq!(server.finish_after(Duration::from_millis(200)).0.len(), 1);
         // Nothing connected to where the redirect points, not even to
@@ -327,7 +374,7 @@ mod tests {
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n".to_vec(),
         )]);
         assert_eq!(
-            send(&server.address, &get("/x"), WAIT),
+            send(&server.address, &get("/x"), &Deadline::after(WAIT)),
             Err(HttpError::Invalid)
         );
     }
@@ -347,7 +394,7 @@ mod tests {
         ] {
             let server = serve(vec![Reply::Raw(raw.to_vec())]);
             assert_eq!(
-                send(&server.address, &get("/x"), WAIT),
+                send(&server.address, &get("/x"), &Deadline::after(WAIT)),
                 Err(HttpError::Invalid),
                 "{:?}",
                 String::from_utf8_lossy(raw)
@@ -361,7 +408,7 @@ mod tests {
         raw.extend(std::iter::repeat_n(b'a', MAX_HEAD + 100));
         let server = serve(vec![Reply::Raw(raw)]);
         assert_eq!(
-            send(&server.address, &get("/x"), WAIT),
+            send(&server.address, &get("/x"), &Deadline::after(WAIT)),
             Err(HttpError::Invalid)
         );
     }
@@ -374,14 +421,14 @@ mod tests {
         );
         let server = serve(vec![Reply::Raw(declared.into_bytes())]);
         assert_eq!(
-            send(&server.address, &get("/x"), WAIT),
+            send(&server.address, &get("/x"), &Deadline::after(WAIT)),
             Err(HttpError::TooLarge)
         );
         let mut streamed = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
         streamed.extend(std::iter::repeat_n(b'a', MAX_BODY + 1));
         let server = serve(vec![Reply::Raw(streamed)]);
         assert_eq!(
-            send(&server.address, &get("/x"), WAIT),
+            send(&server.address, &get("/x"), &Deadline::after(WAIT)),
             Err(HttpError::TooLarge)
         );
     }
@@ -395,7 +442,7 @@ mod tests {
             address.unwrap()
         };
         assert_eq!(
-            send(&address, &get("/x"), WAIT),
+            send(&address, &get("/x"), &Deadline::after(WAIT)),
             Err(HttpError::Unreachable)
         );
     }
@@ -405,10 +452,43 @@ mod tests {
         let server = serve(vec![Reply::Hang(Duration::from_secs(2))]);
         let started = Instant::now();
         assert_eq!(
-            send(&server.address, &get("/x"), Duration::from_millis(300)),
+            send(
+                &server.address,
+                &get("/x"),
+                &Deadline::after(Duration::from_millis(300))
+            ),
             Err(HttpError::TimedOut)
         );
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_result_judged_after_the_deadline_is_the_late_one() {
+        let on_time = Deadline::after(Duration::from_secs(60));
+        assert_eq!(
+            on_time.judge(Ok::<_, HttpError>(1), HttpError::TimedOut),
+            Ok(1)
+        );
+        assert_eq!(
+            on_time.judge(Err::<i32, _>(HttpError::Invalid), HttpError::TimedOut),
+            Err(HttpError::Invalid)
+        );
+        // Over by the time the result is judged: a success and a failure
+        // are both the late one.
+        let late = Deadline::late_after(Duration::from_secs(60));
+        assert_eq!(
+            late.judge(Ok::<_, HttpError>(1), HttpError::TimedOut),
+            Err(HttpError::TimedOut)
+        );
+        assert_eq!(
+            late.judge(Err::<i32, _>(HttpError::Invalid), HttpError::TimedOut),
+            Err(HttpError::TimedOut)
+        );
+        // A deadline that has passed leaves nothing to wait with.
+        assert_eq!(
+            Deadline::after(Duration::ZERO).remaining(),
+            Err(HttpError::TimedOut)
+        );
     }
 
     #[test]
