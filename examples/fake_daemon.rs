@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! $env:ULLAGE_CONTROL_PIPE = '\\.\pipe\ullage-fake'
-//! cargo run --example fake_daemon -- rich      # or: empty, many
+//! cargo run --example fake_daemon -- rich      # or: empty, many, slow
 //! ullage-win.exe                               # in another shell, same variable
 //! ```
 
@@ -202,6 +202,10 @@ mod imp {
             if let Some(bytes) = read_request(pipe)
                 && let Ok(request) = serde_json::from_slice::<ControlRequest>(&bytes)
             {
+                // A daemon that takes its time, to see the window stay alive.
+                if scenario == "slow" {
+                    std::thread::sleep(std::time::Duration::from_secs(20));
+                }
                 let snapshots = match scenario.as_str() {
                     "empty" => Vec::new(),
                     // Enough accounts to fill a tall screen.

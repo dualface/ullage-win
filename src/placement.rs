@@ -11,6 +11,16 @@ pub struct Edges {
 }
 
 impl Edges {
+    /// This area made `by` pixels larger on every side.
+    pub fn grown(self, by: i32) -> Self {
+        Self {
+            left: self.left - by,
+            top: self.top - by,
+            right: self.right + by,
+            bottom: self.bottom + by,
+        }
+    }
+
     fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
     }
@@ -83,6 +93,19 @@ mod tests {
         right: 3840,
         bottom: 1080,
     };
+
+    #[test]
+    fn an_area_grows_on_every_side() {
+        assert_eq!(
+            PRIMARY.grown(10),
+            Edges {
+                left: -10,
+                top: -10,
+                right: 1930,
+                bottom: 1050
+            }
+        );
+    }
 
     #[test]
     fn the_default_is_the_top_right_of_the_work_area_16_dips_in() {

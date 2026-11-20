@@ -48,6 +48,8 @@ pub enum Role {
     CommandBg,
     /// Border of the secondary button.
     ButtonBorder,
+    /// One step of the shadow around the window; steps add up.
+    Shadow,
     /// Fill of the primary button.
     PrimaryBg,
     /// Label of the primary button.
@@ -92,6 +94,7 @@ impl Mode {
             Role::Hover => pick(light, rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.08)),
             Role::CommandBg => pick(light, rgb(0xF5F5F5), rgb(0x202020)),
             Role::ButtonBorder => pick(light, rgb(0xD1D1D1), rgb(0x4A4A4A)),
+            Role::Shadow => pick(light, rgba(0, 0, 0, 0.022), rgba(0, 0, 0, 0.045)),
             Role::PrimaryBg => pick(light, rgb(0x0E6A69), rgb(0x5CC6BF)),
             Role::PrimaryText => pick(light, rgb(0xFFFFFF), rgb(0x0B1F1E)),
         }
