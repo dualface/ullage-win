@@ -97,10 +97,56 @@ the tray menu.
 ## Settings
 
 The settings are in `%LOCALAPPDATA%\Ullage\window.json`: window position,
-layout, always on top, click-through, text size and opacity. A missing or broken
-file means the defaults. Whether the app starts at sign-in is not in this file:
+layout, always on top, click-through, text size, opacity, and which daemon the
+window asks (`connection` and, for a remote one, `remote_address`). A missing or
+broken file means the defaults. The device token of a remote daemon is not in
+this file: see "A daemon on another host". Whether the app starts at sign-in is not in this file:
 it is the value `Ullage Window` under
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+
+## A daemon on another host
+
+The window can show the usage that the daemon of another host knows, for
+example a Linux machine, through the daemon's HTTP API. Choose
+`Connection` > `Remote daemon` in the tray menu.
+
+On the host that runs the daemon:
+
+1. Turn on the HTTP API in the ullage config (`http.enabled`), and let it
+   listen on a Tailscale or a private network address. The daemon prints the
+   addresses it listens on when it starts.
+2. Run `ullage device pair`. It prints a pairing code that is good for five
+   minutes and works once.
+
+On this host:
+
+1. Copy `<ip>:<port> <code>` to the clipboard, for example
+   `100.71.140.68:7878 ABC-DEF`.
+2. Choose `Connection` > `Pair from clipboard...`. The window shows the address
+   and asks before it sends the code. After you agree, the window pairs, saves
+   the token, and starts to show that daemon.
+
+Use `Connection` > `Local daemon` to go back to the daemon of this host, and
+`Connection` > `Forget remote daemon` to delete the token and the address.
+
+Some points to know:
+
+- Only an IPv4 address is accepted, and only a loopback, Tailscale (100.64.0.0/10)
+  or private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) one. A host name or a
+  public address is refused.
+- The HTTP API has no TLS. On Tailscale the traffic is encrypted by WireGuard.
+  On any other address the token and the usage cross the network as plain text,
+  and the menu entry says `(plaintext)`.
+- The device token is kept in the Windows Credential Manager, under the name
+  `Ullage Window remote token`, together with the address it belongs to. It is
+  never written to `window.json` or to any log.
+- The window only reads. The token, however, is a device token of the daemon,
+  which also accepts it for the other routes of its HTTP API. If a token is lost
+  or leaked, run `ullage device revoke <device-id>` on the host of the daemon
+  (`ullage device list` shows the ids). The window then says that the remote
+  daemon rejected this device, and you pair again.
+- Someone who takes over the address that was paired receives the token with
+  every request. Prefer a Tailscale address.
 
 ## Try it without a daemon
 
