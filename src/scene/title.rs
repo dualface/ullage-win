@@ -97,6 +97,8 @@ pub fn build(input: &Input, width: f32, strip: bool, measure: &dyn Measure) -> T
     let (button_w, button_h) = metrics.button;
     let mut right = width - BORDER - metrics.pad_right;
     // The buttons of the full title bar are 8 DIPs apart; the strip has one.
+    // `right` is the next button's right edge: after a button it is that
+    // button's left edge minus this gap.
     let button_gap = if strip { 0.0 } else { 8.0 };
     let mut add_button = |target: Target, icon: Icon, color: Role, shapes: &mut Vec<Shape>| {
         let rect = Rect::new(right - button_w, mid - button_h / 2.0, button_w, button_h);
@@ -146,9 +148,10 @@ pub fn build(input: &Input, width: f32, strip: bool, measure: &dyn Measure) -> T
     let label = countdown_label(seconds);
     let label_font = font(FontKind::Mono, metrics.label_size, 400);
     let label_w = text_box_width(measure, &label, label_font);
-    // `right` is now the gap to the left of the last button. The ring and its
-    // label end 4 DIPs inside it; on the strip they are `ring_gap` from the
-    // button.
+    // `right` is now 8 DIPs left of the last button. The ring and its label
+    // end another 4 DIPs further left, which is 12 DIPs from the button: the
+    // 8 DIP gap plus the 4 DIPs of padding after the label. On the strip they
+    // are `ring_gap` from the button.
     let label_right = if strip {
         right - metrics.ring_gap
     } else {
@@ -242,8 +245,8 @@ mod tests {
         // Centred in the 40 DIP bar.
         assert_eq!(hide.y, 1.0 + 4.0);
         assert!(hit(&scene, Target::Expand).is_none());
-        // The ring and its label end 4 DIPs inside the 8 DIP gap before the
-        // first button.
+        // The ring and its label end 12 DIPs left of the first button: the
+        // 8 DIP gap plus 4 DIPs of padding.
         let label = text_of(&scene.title, "1m32s");
         assert_eq!(label.rect.right(), pin.x - 12.0);
     }
