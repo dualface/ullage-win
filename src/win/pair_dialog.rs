@@ -15,8 +15,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DLGTEMPLATE, DialogBoxIndirectParamW, EN_CHANGE, EndDialog, GWLP_USERDATA,
-    GWLP_WNDPROC, GetDlgItem, GetDlgItemTextW, GetWindowLongPtrW, GetWindowRect, SWP_NOSIZE,
-    SWP_NOZORDER, SendDlgItemMessageW, SendMessageW, SetDlgItemTextW, SetForegroundWindow,
+    GWLP_WNDPROC, GetDlgItem, GetDlgItemTextW, GetParent, GetWindowLongPtrW, GetWindowRect,
+    SWP_NOSIZE, SWP_NOZORDER, SendDlgItemMessageW, SetDlgItemTextW, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, WM_CLOSE, WM_COMMAND, WM_INITDIALOG,
 };
 
@@ -32,7 +32,14 @@ use crate::remote::pairing::{can_submit, format_pair_code_input};
 const EM_SETSEL: u32 = 0x00B1;
 const EM_LIMITTEXT: u32 = 0x00C5;
 const EM_REPLACESEL: u32 = 0x00C2;
+const EM_UNDO: u32 = 0x00C7;
+const WM_SETTEXT: u32 = 0x000C;
+const WM_KEYDOWN: u32 = 0x0100;
+const WM_CHAR: u32 = 0x0102;
+const WM_CUT: u32 = 0x0300;
 const WM_PASTE: u32 = 0x0302;
+const WM_CLEAR: u32 = 0x0303;
+const WM_UNDO: u32 = 0x0304;
 
 /// What the user typed when they pressed OK.
 pub struct Entry {
@@ -138,8 +145,12 @@ unsafe extern "system" fn dialog_proc(
     }
 }
 
-/// The window procedure of the code box: the edit control's own, but for a
-/// paste, which is made into the form of a code before it goes in.
+/// The window procedure of the code box: the edit control's own, and after
+/// each message that can change the text, the text is made into the form of a
+/// code. `EN_CHANGE` does that too, but a multi-line box does not send it as
+/// soon as the text is changed, and what is typed or pasted must not wait for
+/// it. The formatting is the same either way, so doing it twice changes
+/// nothing.
 unsafe extern "system" fn code_box_proc(
     hwnd: HWND,
     message: u32,
@@ -148,27 +159,32 @@ unsafe extern "system" fn code_box_proc(
 ) -> LRESULT {
     // The edit control's own procedure, kept in the user data of the box.
     let original = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
-    if message == WM_PASTE {
-        let pasted = super::clipboard::pasted_text(hwnd).unwrap_or_default();
-        // What is left of the text takes the place of the selection, and the
-        // change of the box formats the whole text again.
-        let formatted = wide(&format_pair_code_input(&pasted));
-        unsafe {
-            SendMessageW(
-                hwnd,
-                EM_REPLACESEL,
-                Some(WPARAM(1)),
-                Some(LPARAM(formatted.as_ptr() as isize)),
-            );
-        }
-        return LRESULT(0);
-    }
     // SAFETY: the value was the window procedure of the box when the dialog
     // was set up, which is a function with this signature.
     let original: windows::Win32::UI::WindowsAndMessaging::WNDPROC =
         unsafe { std::mem::transmute(original) };
-    unsafe { CallWindowProcW(original, hwnd, message, wparam, lparam) }
+    let result = unsafe { CallWindowProcW(original, hwnd, message, wparam, lparam) };
+    if CHANGES_TEXT.contains(&message)
+        && let Ok(dialog) = unsafe { GetParent(hwnd) }
+        && let Some(shared) = shared_of(dialog)
+    {
+        code_changed(dialog, shared);
+    }
+    result
 }
+
+/// The messages after which the text of the code box may be another.
+const CHANGES_TEXT: [u32; 9] = [
+    WM_SETTEXT,
+    WM_KEYDOWN,
+    WM_CHAR,
+    WM_CUT,
+    WM_PASTE,
+    WM_CLEAR,
+    WM_UNDO,
+    EM_REPLACESEL,
+    EM_UNDO,
+];
 
 fn initialize(hwnd: HWND, shared: &Shared) {
     unsafe {
@@ -188,9 +204,7 @@ fn initialize(hwnd: HWND, shared: &Shared) {
         );
         let prefill = wide(&shared.prefill);
         let _ = SetDlgItemTextW(hwnd, ID_ADDRESS.into(), pcwstr(&prefill));
-        // A single-line box takes only the first line of a paste, so a line
-        // break in front of the code would leave nothing. The code box takes
-        // the paste itself.
+        // The code box formats what is typed or pasted as soon as it is.
         if let Ok(code) = GetDlgItem(Some(hwnd), ID_CODE.into()) {
             let original = GetWindowLongPtrW(code, GWLP_WNDPROC);
             SetWindowLongPtrW(code, GWLP_USERDATA, original);
@@ -369,9 +383,28 @@ mod tests {
         (packed >> 16) as usize & 0xFFFF
     }
 
+    /// Types one character into the box, as the keyboard does.
+    fn type_key(hwnd: HWND, id: u16, key: char) {
+        unsafe {
+            SendDlgItemMessageW(hwnd, id.into(), WM_CHAR, WPARAM(key as usize), LPARAM(0));
+        }
+    }
+
+    /// Selects `from..to` in the box.
+    fn select(hwnd: HWND, id: u16, from: usize, to: usize) {
+        unsafe {
+            SendDlgItemMessageW(
+                hwnd,
+                id.into(),
+                EM_SETSEL,
+                WPARAM(from),
+                LPARAM(to as isize),
+            );
+        }
+    }
+
     /// Pastes `text` from the clipboard into the box, as Ctrl+V does.
     fn paste(hwnd: HWND, id: u16, text: &str) {
-        const WM_PASTE: u32 = 0x0302;
         crate::win::clipboard::set_text(HWND::default(), text).unwrap();
         unsafe {
             SendDlgItemMessageW(hwnd, id.into(), WM_PASTE, WPARAM(0), LPARAM(0));
@@ -437,6 +470,32 @@ mod tests {
                 paste(dialog, ID_CODE, pasted);
                 assert_eq!(text_of(dialog, ID_CODE), "ABC-DEF", "{pasted:?}");
             }
+            assert!(enabled(dialog, ID_OK));
+            // Typed key by key.
+            set_text(dialog, ID_CODE, "");
+            for key in "abcd".chars() {
+                type_key(dialog, ID_CODE, key);
+            }
+            assert_eq!(text_of(dialog, ID_CODE), "ABC-D");
+            assert_eq!(caret_of(dialog, ID_CODE), 5);
+            // A paste replaces the selection, and the whole text is formatted
+            // again, with the caret after it.
+            set_text(dialog, ID_CODE, "abcdef");
+            select(dialog, ID_CODE, 0, 1);
+            paste(dialog, ID_CODE, "x");
+            assert_eq!(text_of(dialog, ID_CODE), "XBC-DEF");
+            assert_eq!(caret_of(dialog, ID_CODE), 7);
+            // The box takes no more than its limit, whatever the paste is:
+            // a code after that many spaces is not taken.
+            set_text(dialog, ID_CODE, "");
+            paste(
+                dialog,
+                ID_CODE,
+                &format!("{}ABC-DEF", " ".repeat(CODE_LIMIT)),
+            );
+            assert_eq!(text_of(dialog, ID_CODE), "");
+            assert!(!enabled(dialog, ID_OK));
+            set_text(dialog, ID_CODE, "abcdef");
             assert!(enabled(dialog, ID_OK));
             // An address that is not taken says why, and holds OK back.
             set_text(dialog, ID_ADDRESS, "8.8.8.8:80");

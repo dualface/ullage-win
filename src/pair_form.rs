@@ -39,6 +39,7 @@ const DS_MODALFRAME: u32 = 0x80;
 // Control styles.
 const SS_LEFT: u32 = 0;
 const SS_NOPREFIX: u32 = 0x80;
+const ES_MULTILINE: u32 = 0x4;
 const ES_AUTOHSCROLL: u32 = 0x80;
 const BS_PUSHBUTTON: u32 = 0;
 const BS_DEFPUSHBUTTON: u32 = 1;
@@ -105,7 +106,13 @@ fn controls() -> [Control; 8] {
         },
         Control {
             class: CLASS_EDIT,
-            style: edit,
+            // Multi-line, so that the control itself takes a paste with a
+            // line break in front of the code: a single-line box takes only
+            // the first line of a paste. The box is one line high. Enter is
+            // not taken by it (no `ES_WANTRETURN`) and so reaches the default
+            // button, and the line breaks are dropped with the other
+            // characters that a code does not have.
+            style: edit | ES_MULTILINE,
             ex_style: WS_EX_CLIENTEDGE,
             rect: (10, 66, 80, 14),
             id: ID_CODE,
@@ -204,6 +211,25 @@ pub fn template() -> Vec<u8> {
         put_u16(&mut bytes, 0);
     }
     bytes
+}
+
+/// One pairing dialog at a time. The dialog disables the window, but the
+/// tray icon still reaches it, and so does a second `Pair…`: whoever opens a
+/// dialog takes the place first, and gives it back when the dialog is gone.
+#[derive(Debug, Default)]
+pub struct OnePlace {
+    taken: bool,
+}
+
+impl OnePlace {
+    /// Takes the place. `false` when it is taken.
+    pub fn take(&mut self) -> bool {
+        !std::mem::replace(&mut self.taken, true)
+    }
+
+    pub fn give_back(&mut self) {
+        self.taken = false;
+    }
 }
 
 /// What the line under the address box says: nothing for an empty box or an
@@ -360,12 +386,13 @@ mod tests {
         // The boxes have a scroll for what does not fit.
         assert_eq!(find(ID_ADDRESS).style & ES_AUTOHSCROLL, ES_AUTOHSCROLL);
         assert_eq!(find(ID_CODE).style & ES_AUTOHSCROLL, ES_AUTOHSCROLL);
-        // A single line each, and neither takes Enter: it reaches the default
-        // button.
-        const ES_MULTILINE: u32 = 0x4;
+        // Only the code box takes a paste of more than one line, and neither
+        // takes Enter: it reaches the default button.
         const ES_WANTRETURN: u32 = 0x1000;
+        assert_eq!(find(ID_ADDRESS).style & ES_MULTILINE, 0);
+        assert_eq!(find(ID_CODE).style & ES_MULTILINE, ES_MULTILINE);
         for id in [ID_ADDRESS, ID_CODE] {
-            assert_eq!(find(id).style & (ES_MULTILINE | ES_WANTRETURN), 0, "{id}");
+            assert_eq!(find(id).style & ES_WANTRETURN, 0, "{id}");
         }
     }
 
@@ -391,6 +418,21 @@ mod tests {
     const _: () = assert!(CODE_LIMIT > 7);
     // The longest host name, a colon and the longest port.
     const _: () = assert!(ADDRESS_LIMIT >= 253 + ":65535".len());
+
+    #[test]
+    fn a_second_dialog_cannot_take_the_place_until_the_first_gives_it_back() {
+        let mut place = OnePlace::default();
+        assert!(place.take());
+        assert!(!place.take());
+        assert!(!place.take());
+        place.give_back();
+        assert!(place.take());
+        // Giving back what is not taken changes nothing.
+        place.give_back();
+        place.give_back();
+        assert!(place.take());
+        assert!(!place.take());
+    }
 
     #[test]
     fn the_note_under_the_address_says_why_it_is_not_taken() {
