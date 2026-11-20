@@ -43,7 +43,7 @@ use crate::menu::{Command, MenuState};
 use crate::placement::{Edges, keep_inside, restore_position, to_px, window_size_px};
 use crate::prefs::{Connection, Prefs, save};
 use crate::remote::address::RemoteAddress;
-use crate::remote::pairing::{self, ApplyError, ForgetError, PairCode, parse_clipboard};
+use crate::remote::pairing::{self, ApplyError, ForgetError, PairCode, start_pairing};
 use crate::remote::store::{Credential, credential_for};
 use crate::scene::{self, Body, Input, Scene, Spot, Target, WORK_AREA_MARGIN};
 use crate::state::{Schedule, State, countdown};
@@ -686,16 +686,9 @@ impl App {
     /// trusted: a bad text says so and sends nothing, and a good one is shown
     /// to the user, with the address, before the code goes anywhere.
     fn pair_from_clipboard(&mut self) -> Option<Dialog> {
-        // A pairing that could not be kept would still use up the code and
-        // register this device at the daemon: it is not started.
-        if self.prefs_path.is_none() {
-            return Some(Dialog::Notice(
-                "There is no place to save the settings, so no pairing was started.".into(),
-            ));
-        }
         let text = clipboard::get_text(self.hwnd).unwrap_or_default();
-        match parse_clipboard(&text) {
-            Err(error) => Some(Dialog::Notice(error.to_string())),
+        match start_pairing(&text, self.prefs_path.is_some()) {
+            Err(refusal) => Some(Dialog::Notice(refusal.to_string())),
             Ok((address, code)) => {
                 let plaintext = if address.is_encrypted_path() {
                     ""
