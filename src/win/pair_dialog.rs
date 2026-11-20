@@ -7,17 +7,17 @@
 
 use std::cell::{Cell, RefCell};
 
-use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DLGTEMPLATE, DialogBoxIndirectParamW, EN_CHANGE, EndDialog, GWLP_USERDATA, GetDlgItem,
-    GetDlgItemTextW, GetWindowLongPtrW, GetWindowRect, SWP_NOSIZE, SWP_NOZORDER,
-    SendDlgItemMessageW, SetDlgItemTextW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    WM_CLOSE, WM_COMMAND, WM_INITDIALOG,
+    CallWindowProcW, DLGTEMPLATE, DialogBoxIndirectParamW, EN_CHANGE, EndDialog, GWLP_USERDATA,
+    GWLP_WNDPROC, GetDlgItem, GetDlgItemTextW, GetWindowLongPtrW, GetWindowRect, SWP_NOSIZE,
+    SWP_NOZORDER, SendDlgItemMessageW, SendMessageW, SetDlgItemTextW, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, WM_CLOSE, WM_COMMAND, WM_INITDIALOG,
 };
 
 use super::util::{hiword, loword, pcwstr, wide};
@@ -31,6 +31,8 @@ use crate::remote::pairing::{can_submit, format_pair_code_input};
 // feature that holds them is not otherwise needed.
 const EM_SETSEL: u32 = 0x00B1;
 const EM_LIMITTEXT: u32 = 0x00C5;
+const EM_REPLACESEL: u32 = 0x00C2;
+const WM_PASTE: u32 = 0x0302;
 
 /// What the user typed when they pressed OK.
 pub struct Entry {
@@ -136,6 +138,38 @@ unsafe extern "system" fn dialog_proc(
     }
 }
 
+/// The window procedure of the code box: the edit control's own, but for a
+/// paste, which is made into the form of a code before it goes in.
+unsafe extern "system" fn code_box_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // The edit control's own procedure, kept in the user data of the box.
+    let original = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
+    if message == WM_PASTE {
+        let pasted = super::clipboard::pasted_text(hwnd).unwrap_or_default();
+        // What is left of the text takes the place of the selection, and the
+        // change of the box formats the whole text again.
+        let formatted = wide(&format_pair_code_input(&pasted));
+        unsafe {
+            SendMessageW(
+                hwnd,
+                EM_REPLACESEL,
+                Some(WPARAM(1)),
+                Some(LPARAM(formatted.as_ptr() as isize)),
+            );
+        }
+        return LRESULT(0);
+    }
+    // SAFETY: the value was the window procedure of the box when the dialog
+    // was set up, which is a function with this signature.
+    let original: windows::Win32::UI::WindowsAndMessaging::WNDPROC =
+        unsafe { std::mem::transmute(original) };
+    unsafe { CallWindowProcW(original, hwnd, message, wparam, lparam) }
+}
+
 fn initialize(hwnd: HWND, shared: &Shared) {
     unsafe {
         SendDlgItemMessageW(
@@ -154,6 +188,14 @@ fn initialize(hwnd: HWND, shared: &Shared) {
         );
         let prefill = wide(&shared.prefill);
         let _ = SetDlgItemTextW(hwnd, ID_ADDRESS.into(), pcwstr(&prefill));
+        // A single-line box takes only the first line of a paste, so a line
+        // break in front of the code would leave nothing. The code box takes
+        // the paste itself.
+        if let Ok(code) = GetDlgItem(Some(hwnd), ID_CODE.into()) {
+            let original = GetWindowLongPtrW(code, GWLP_WNDPROC);
+            SetWindowLongPtrW(code, GWLP_USERDATA, original);
+            SetWindowLongPtrW(code, GWLP_WNDPROC, code_box_proc as *const () as isize);
+        }
     }
     refresh(hwnd);
     center_on_owner(hwnd, shared.owner);
@@ -395,7 +437,6 @@ mod tests {
                 paste(dialog, ID_CODE, pasted);
                 assert_eq!(text_of(dialog, ID_CODE), "ABC-DEF", "{pasted:?}");
             }
-            assert!(enabled(dialog, ID_OK));
             assert!(enabled(dialog, ID_OK));
             // An address that is not taken says why, and holds OK back.
             set_text(dialog, ID_ADDRESS, "8.8.8.8:80");
