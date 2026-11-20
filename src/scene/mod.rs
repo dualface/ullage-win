@@ -313,7 +313,8 @@ pub fn build(input: &Input, measure: &dyn Measure) -> Scene {
     let mut body = Content::default();
     match input.body {
         Body::Loading => {}
-        Body::Empty => cards::empty(&mut body, inner_width, scale, measure),
+        Body::Empty if strip => cards::empty(&mut body, inner_width, strip::CONTENT_PAD),
+        Body::Empty => cards::empty(&mut body, inner_width, cards::EXPANDED_PAD),
         Body::Cards(list) if strip => strip::build(&mut body, list, inner_width, scale, measure),
         Body::Cards(list) => {
             cards::build(&mut body, list, input.layout, inner_width, scale, measure)

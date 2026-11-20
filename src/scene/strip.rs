@@ -2,7 +2,7 @@
 
 use ullage_cli::usage_view::{UsageCard, UsageRow};
 
-use super::cards::reading_width;
+use super::cards::{ContentPad, reading_width};
 use super::{Align, Content, FontKind, Measure, Rect, Shape, font, text, text_box_width};
 use crate::compact::lowest_row;
 use crate::display::{BAR_CELLS, Bar, ReadingText, bar, reading_text};
@@ -10,6 +10,13 @@ use crate::theme::Role;
 
 const PAD_SIDE: f32 = 4.0;
 const PAD_BOTTOM: f32 = 4.0;
+/// The content area of the strip: no space above, 4 DIPs at the sides and
+/// below.
+pub(super) const CONTENT_PAD: ContentPad = ContentPad {
+    top: 0.0,
+    side: PAD_SIDE,
+    bottom: PAD_BOTTOM,
+};
 const ROW_HEIGHT: f32 = 28.0;
 const ROW_PAD: f32 = 8.0;
 const COLUMN_GAP: f32 = 8.0;
@@ -375,7 +382,11 @@ mod tests {
         assert_eq!(line.color, Role::Faint);
         assert_eq!(scene.width, 290.0);
         assert_eq!(scene.card_rects.len(), 1);
-        assert_eq!(scene.card_rects[0].w, 290.0 - 2.0 - 20.0);
+        // The strip's content area: 4 DIPs at each side, none above.
+        assert_eq!(scene.card_rects[0].w, 290.0 - 2.0 - 8.0);
+        assert_eq!(scene.card_rects[0].x, 4.0);
+        assert_eq!(scene.card_rects[0].y, 0.0);
+        assert_eq!(scene.content_height, scene.card_rects[0].bottom() + 4.0);
         let frame = scene.content.iter().any(|shape| {
             matches!(
                 shape,

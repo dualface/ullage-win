@@ -96,16 +96,26 @@ pub(super) fn reading_width(
     }
 }
 
-/// The empty state: one card with a faint line of text.
-pub(super) fn empty(body: &mut Content, inner_width: f32, scale: f32, measure: &dyn Measure) {
-    let _ = (scale, measure);
-    let width = inner_width - 2.0 * CONTENT_PAD_SIDE;
-    let rect = Rect::new(
-        CONTENT_PAD_SIDE,
-        CONTENT_PAD_TOP,
-        width,
-        2.0 + 2.0 * EMPTY_PAD + EMPTY_LINE,
-    );
+/// Space around the content of a layout: above, at each side, and below.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ContentPad {
+    pub top: f32,
+    pub side: f32,
+    pub bottom: f32,
+}
+
+/// The content area of the expanded layouts.
+pub(super) const EXPANDED_PAD: ContentPad = ContentPad {
+    top: CONTENT_PAD_TOP,
+    side: CONTENT_PAD_SIDE,
+    bottom: CONTENT_PAD_BOTTOM,
+};
+
+/// The empty state: one card with a faint line of text, in the content area
+/// of the layout that shows it.
+pub(super) fn empty(body: &mut Content, inner_width: f32, pad: ContentPad) {
+    let width = inner_width - 2.0 * pad.side;
+    let rect = Rect::new(pad.side, pad.top, width, 2.0 + 2.0 * EMPTY_PAD + EMPTY_LINE);
     body.shapes.push(card_frame(rect));
     body.shapes.push(text(
         Rect::new(rect.x, rect.y + 1.0 + EMPTY_PAD, rect.w, EMPTY_LINE),
@@ -116,7 +126,7 @@ pub(super) fn empty(body: &mut Content, inner_width: f32, scale: f32, measure: &
         true,
     ));
     body.card_rects.push(rect);
-    body.height = rect.bottom() + CONTENT_PAD_BOTTOM;
+    body.height = rect.bottom() + pad.bottom;
 }
 
 fn card_frame(rect: Rect) -> Shape {
