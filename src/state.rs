@@ -122,10 +122,6 @@ impl Schedule {
         !self.fetching && now >= self.next_at
     }
 
-    pub fn is_fetching(&self) -> bool {
-        self.fetching
-    }
-
     pub fn start(&mut self) {
         self.fetching = true;
     }
@@ -308,7 +304,6 @@ mod tests {
         let mut schedule = Schedule::new(now);
         assert!(schedule.due(now));
         schedule.start();
-        assert!(schedule.is_fetching());
         assert!(!schedule.due(now + Duration::from_secs(500)));
     }
 
@@ -346,7 +341,6 @@ mod tests {
         schedule.start();
         schedule.request_now(now);
         assert!(!schedule.due(now));
-        assert!(schedule.is_fetching());
     }
 
     #[test]

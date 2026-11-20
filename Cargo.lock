@@ -1939,6 +1939,7 @@ dependencies = [
  "ullage-client",
  "ullage-protocol",
  "windows",
+ "windows-numerics",
 ]
 
 [[package]]

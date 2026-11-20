@@ -61,7 +61,7 @@ impl Rect {
         x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
     }
 
-    fn translated(&self, dx: f32, dy: f32) -> Self {
+    pub fn translated(&self, dx: f32, dy: f32) -> Self {
         Self::new(self.x + dx, self.y + dy, self.w, self.h)
     }
 }
@@ -246,7 +246,8 @@ impl Scene {
     }
 
     pub fn spot(&self, x: f32, y: f32, scroll: f32) -> Spot {
-        let content_y = y - self.content_top + scroll;
+        // Content shapes are inside the frame line.
+        let (x, content_y) = (x - BORDER, y - self.content_top + scroll);
         let in_view = y >= self.content_top && y < self.content_top + self.view_height;
         for hit in &self.hits {
             let inside = if hit.scrolls {
