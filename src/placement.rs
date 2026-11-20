@@ -59,6 +59,19 @@ pub fn restore_position(
     default_position(primary_work, window, dpi)
 }
 
+/// Whether the bitmap the window is drawn on must be made again: it has to
+/// match the size of the window in pixels and the scale it is drawn at, and
+/// the window may reach its new size by other means than a call that resizes
+/// the bitmap.
+pub fn surface_is_stale(
+    surface: (i32, i32),
+    surface_dpi: u32,
+    window: (i32, i32),
+    dpi: u32,
+) -> bool {
+    surface != (window.0.max(1), window.1.max(1)) || surface_dpi != dpi
+}
+
 /// Moves a window of `size` that starts at `(x, y)` just far enough to lie
 /// inside `work`, when it fits at all.
 pub fn keep_inside(work: Edges, (x, y): (i32, i32), size: (i32, i32)) -> (i32, i32) {
@@ -159,6 +172,18 @@ mod tests {
             restore_position(Some((2000, 100)), (800, 500), &[PRIMARY], PRIMARY, 96),
             expected
         );
+    }
+
+    #[test]
+    fn a_surface_is_stale_when_its_size_or_its_scale_differs_from_the_window() {
+        assert!(!surface_is_stale((400, 300), 96, (400, 300), 96));
+        assert!(surface_is_stale((400, 300), 96, (600, 450), 144));
+        // The window already has the new size, but the scale changed.
+        assert!(surface_is_stale((600, 450), 96, (600, 450), 144));
+        // The scale is the same and the size is not.
+        assert!(surface_is_stale((600, 450), 144, (600, 460), 144));
+        // A window of no size still has a one pixel surface.
+        assert!(!surface_is_stale((1, 1), 96, (0, 0), 96));
     }
 
     #[test]

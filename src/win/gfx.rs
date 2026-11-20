@@ -28,6 +28,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 use super::surface::Surface;
 use super::text::Typography;
 use crate::icons::{Mark, Prim, marks};
+use crate::placement::surface_is_stale;
 use crate::scene::{BORDER, DotFill, Icon, Rect, SHADOW_MARGIN, Scene, Shape, Text};
 use crate::svgpath::{Seg, parse};
 use crate::theme::{Color, Mode, Role};
@@ -548,7 +549,7 @@ impl Renderer {
 
     /// Makes the surface fit a window of `size` pixels at `dpi`.
     pub fn resize(&mut self, size: (i32, i32), dpi: u32) -> Result<()> {
-        if self.surface.size == (size.0.max(1), size.1.max(1)) && self.dpi == dpi {
+        if !surface_is_stale(self.surface.size, self.dpi, size, dpi) {
             return Ok(());
         }
         let surface = Surface::new(size.0, size.1)?;

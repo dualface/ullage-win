@@ -282,7 +282,12 @@ impl App {
             self.renderer = Renderer::new((width, height), self.dpi, self.text.clone()).ok();
         }
         let opacity = (self.prefs.opacity * 255 / 100) as u8;
+        let (size, dpi) = (self.window_size_px(), self.dpi);
         if let Some(renderer) = &mut self.renderer
+            // The window may have reached its size without a call that
+            // resizes the bitmap, as when Windows suggests the new size on a
+            // change of scale; the bitmap is made to fit before each draw.
+            && renderer.resize(size, dpi).is_ok()
             && renderer
                 .draw(self.hwnd, &self.scene, self.mode, self.scroll, opacity)
                 .is_err()
@@ -353,6 +358,8 @@ impl App {
             self.state = state.after_fetch(outcome);
             self.schedule.finish(Instant::now());
         }
+        // A refresh asked for during the fetch is due now.
+        self.start_due_fetch();
         if self.visible() {
             self.rebuild_scene();
         }

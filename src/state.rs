@@ -105,6 +105,9 @@ impl State {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Schedule {
     fetching: bool,
+    /// A refresh was asked for while a fetch was running: it follows that
+    /// fetch at once.
+    pending: bool,
     next_at: Instant,
 }
 
@@ -113,6 +116,7 @@ impl Schedule {
     pub fn new(now: Instant) -> Self {
         Self {
             fetching: false,
+            pending: false,
             next_at: now,
         }
     }
@@ -127,16 +131,23 @@ impl Schedule {
     }
 
     /// A fetch ended, with a result or without. The next one is a full
-    /// interval away.
+    /// interval away, unless a refresh was asked for meanwhile: that one is
+    /// due now, and the interval starts when it ends.
     pub fn finish(&mut self, now: Instant) {
         self.fetching = false;
-        self.next_at = now + REFRESH;
+        self.next_at = if std::mem::take(&mut self.pending) {
+            now
+        } else {
+            now + REFRESH
+        };
     }
 
-    /// Makes a fetch due now. A fetch that is already running is enough, and
-    /// the interval starts when it ends.
+    /// Makes a fetch due now. While a fetch runs, the request waits for it to
+    /// end and is then served at once; any number of requests count as one.
     pub fn request_now(&mut self, now: Instant) {
-        if !self.fetching {
+        if self.fetching {
+            self.pending = true;
+        } else {
             self.next_at = now;
         }
     }
@@ -335,12 +346,24 @@ mod tests {
     }
 
     #[test]
-    fn refresh_now_during_a_fetch_changes_nothing() {
+    fn refresh_now_during_a_fetch_waits_for_it_and_then_runs_at_once() {
         let now = Instant::now();
         let mut schedule = Schedule::new(now);
         schedule.start();
+        // Two requests count as one.
         schedule.request_now(now);
-        assert!(!schedule.due(now));
+        schedule.request_now(now);
+        assert!(!schedule.due(now), "no second fetch runs beside the first");
+        let ended = now + Duration::from_secs(30);
+        schedule.finish(ended);
+        assert!(schedule.due(ended), "the refresh follows the fetch at once");
+
+        // The interval starts when that fetch ends, and nothing is left over.
+        schedule.start();
+        let second = ended + Duration::from_secs(3);
+        schedule.finish(second);
+        assert!(!schedule.due(second + Duration::from_secs(119)));
+        assert!(schedule.due(second + Duration::from_secs(120)));
     }
 
     #[test]
