@@ -32,6 +32,8 @@ pub fn fetch_remote(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use serde_json::json;
     use ullage_protocol::{CONTROL_PROTOCOL_VERSION, ControlError, ControlResult};
 
@@ -66,7 +68,10 @@ mod tests {
 
     #[test]
     fn without_a_credential_for_the_address_nothing_is_sent() {
-        let server = serve(Vec::new());
+        // A daemon that is listening, with an answer ready: nothing may ask.
+        let server = serve(vec![Reply::Raw(ok(&body(ControlResult::Snapshots(
+            Vec::new(),
+        ))))]);
         let other = RemoteAddress::parse("10.0.0.1:7878").unwrap();
         for store in [MemoryStore::default(), store_for(other)] {
             assert_eq!(
@@ -74,7 +79,7 @@ mod tests {
                 FailureKind::NotPaired
             );
         }
-        assert!(server.finish().is_empty());
+        assert!(server.finish_after(Duration::from_millis(200)).is_empty());
     }
 
     #[test]

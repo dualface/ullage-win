@@ -135,6 +135,9 @@ pub fn map_response(status: u16, body: &[u8], request_id: &str) -> Mapped {
             Err(_) => Mapped::Invalid,
         },
         401 => Mapped::Rejected,
+        // A redirect is never followed and never an error of the daemon,
+        // whatever its body holds.
+        300..=399 => Mapped::Invalid,
         400 => {
             if let Ok(document) = serde_json::from_slice::<MismatchDocument>(body)
                 && document.error == "protocol_mismatch"
@@ -260,6 +263,12 @@ mod tests {
         }
     }
 
+    fn error_document_for_tests() -> Vec<u8> {
+        error_body(ControlError::AccountNotFound {
+            account_id: "gone".into(),
+        })
+    }
+
     #[test]
     fn a_rejected_token_is_not_an_invalid_answer() {
         assert_eq!(
@@ -279,6 +288,8 @@ mod tests {
                 b"{\"result\":\"nonsense\",\"version\":1,\"request_id\":\"a\"}",
             ),
             (302, b""),
+            (302, &error_document_for_tests()[..]),
+            (301, &error_document_for_tests()[..]),
             (403, b"{\"error\":\"forbidden\"}"),
             (404, b"{\"error\":\"not_found\"}"),
             (500, b""),

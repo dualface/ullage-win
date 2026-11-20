@@ -162,12 +162,16 @@ pub enum ApplyError {
     Store,
     /// The settings could not be saved. The credential is as it was before.
     Settings,
+    /// The settings could not be saved, and the credential could not be put
+    /// back either: the earlier pairing, if there was one, is lost.
+    Rollback,
 }
 
 /// Keeps a new credential and the settings that name its address as one
 /// step. The credential goes first. When the settings then fail to save, the
 /// credential is put back as it was, so the token is never left with an
-/// address the settings do not name.
+/// address the settings do not name. When it cannot be put back, that is
+/// told apart: the caller must not say that nothing changed.
 pub fn apply(
     store: &dyn TokenStore,
     credential: &Credential,
@@ -178,11 +182,15 @@ pub fn apply(
     if save_settings().is_ok() {
         return Ok(());
     }
-    let _ = match &before {
+    let restored = match &before {
         Some(earlier) => store.save(earlier),
         None => store.delete(),
     };
-    Err(ApplyError::Settings)
+    Err(if restored.is_ok() {
+        ApplyError::Settings
+    } else {
+        ApplyError::Rollback
+    })
 }
 
 #[cfg(test)]
@@ -366,10 +374,22 @@ mod tests {
     }
 
     #[test]
+    fn a_credential_that_cannot_be_put_back_is_told_apart() {
+        let store = MemoryStore::with(credential("old-token"));
+        // The first save works; the one that puts the old credential back
+        // does not.
+        store.fail_saves_after.set(Some(1));
+        let result = apply(&store, &credential("new-token"), || {
+            Err(io::Error::other("disk full"))
+        });
+        assert_eq!(result, Err(ApplyError::Rollback));
+    }
+
+    #[test]
     fn a_store_failure_changes_nothing_and_does_not_save_settings() {
         let old = credential("old-token");
         let store = MemoryStore::with(old.clone());
-        store.fail_save.set(true);
+        store.fail_saves_after.set(Some(0));
         let mut saved = false;
         let result = apply(&store, &credential("new-token"), || {
             saved = true;

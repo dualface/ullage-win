@@ -73,14 +73,16 @@ pub mod memory {
     #[derive(Default)]
     pub struct MemoryStore {
         pub credential: RefCell<Option<Credential>>,
-        pub fail_save: std::cell::Cell<bool>,
+        /// Saves from this many on fail: `Some(0)` fails them all.
+        pub fail_saves_after: std::cell::Cell<Option<usize>>,
+        saves: std::cell::Cell<usize>,
     }
 
     impl MemoryStore {
         pub fn with(credential: Credential) -> Self {
             Self {
                 credential: RefCell::new(Some(credential)),
-                fail_save: Default::default(),
+                ..Self::default()
             }
         }
     }
@@ -91,7 +93,13 @@ pub mod memory {
         }
 
         fn save(&self, credential: &Credential) -> Result<(), StoreError> {
-            if self.fail_save.get() {
+            let made = self.saves.get();
+            self.saves.set(made + 1);
+            if self
+                .fail_saves_after
+                .get()
+                .is_some_and(|after| made >= after)
+            {
                 return Err(StoreError);
             }
             *self.credential.borrow_mut() = Some(credential.clone());

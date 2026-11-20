@@ -54,14 +54,30 @@ pub fn send(
     let deadline = Instant::now() + timeout;
     let mut stream = TcpStream::connect_timeout(&address.socket_addr(), remaining(deadline)?)
         .map_err(io_error)?;
-    stream
-        .set_write_timeout(Some(remaining(deadline)?))
-        .map_err(io_error)?;
-    stream.write_all(&head).map_err(io_error)?;
+    write_all(&mut stream, &head, deadline)?;
     if let Some(body) = request.body {
-        stream.write_all(body).map_err(io_error)?;
+        write_all(&mut stream, body, deadline)?;
     }
-    read_response(&mut stream, deadline)
+    let response = read_response(&mut stream, deadline)?;
+    // An answer that completed at the deadline is too late.
+    remaining(deadline)?;
+    Ok(response)
+}
+
+/// Writes all of `bytes`. Each write is given what is left of the deadline.
+fn write_all(stream: &mut TcpStream, bytes: &[u8], deadline: Instant) -> Result<(), HttpError> {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        stream
+            .set_write_timeout(Some(remaining(deadline)?))
+            .map_err(io_error)?;
+        let count = stream.write(rest).map_err(io_error)?;
+        if count == 0 {
+            return Err(HttpError::Unreachable);
+        }
+        rest = &rest[count..];
+    }
+    Ok(())
 }
 
 fn remaining(deadline: Instant) -> Result<Duration, HttpError> {
@@ -288,17 +304,17 @@ mod tests {
 
     #[test]
     fn a_redirect_is_an_answer_and_is_not_followed() {
+        // The redirect points at a server of its own, which is watched.
+        let target = serve(vec![Reply::Raw(ok(b"must not be asked for"))]);
+        let location = format!("http://{}/", target.address);
         let server = serve(vec![
-            Reply::Raw(reply(
-                "302 Found",
-                &[("Location", "http://127.0.0.1:1/")],
-                b"",
-            )),
-            Reply::Raw(ok(b"must not be asked for")),
+            Reply::Raw(reply("302 Found", &[("Location", &location)], b"")),
+            Reply::Raw(ok(b"must not be asked for either")),
         ]);
         let response = send(&server.address, &get("/x"), WAIT).unwrap();
         assert_eq!(response.status, 302);
         assert_eq!(server.finish_after(Duration::from_millis(200)).len(), 1);
+        assert!(target.finish_after(Duration::from_millis(200)).is_empty());
     }
 
     #[test]

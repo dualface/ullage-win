@@ -7,7 +7,7 @@
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RemoteAddress {
@@ -70,13 +70,6 @@ impl fmt::Display for RemoteAddress {
 impl Serialize for RemoteAddress {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(self)
-    }
-}
-
-impl<'de> Deserialize<'de> for RemoteAddress {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        Self::parse(&text).map_err(serde::de::Error::custom)
     }
 }
 
@@ -200,17 +193,11 @@ mod tests {
     }
 
     #[test]
-    fn an_address_is_stored_as_text_and_a_bad_one_is_refused() {
+    fn an_address_is_stored_as_text() {
         let address = parse("100.71.140.68:7878").unwrap();
         assert_eq!(
             serde_json::to_string(&address).unwrap(),
             "\"100.71.140.68:7878\""
         );
-        assert_eq!(
-            serde_json::from_str::<RemoteAddress>("\"100.71.140.68:7878\"").unwrap(),
-            address
-        );
-        assert!(serde_json::from_str::<RemoteAddress>("\"8.8.8.8:80\"").is_err());
-        assert!(serde_json::from_str::<RemoteAddress>("5").is_err());
     }
 }
