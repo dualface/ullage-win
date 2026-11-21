@@ -6,6 +6,7 @@
 //! while the app is not borrowed, like a menu or a message box.
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -14,7 +15,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, DLGTEMPLATE, DialogBoxIndirectParamW, EN_CHANGE, EndDialog, GWLP_USERDATA,
+    CallWindowProcW, DLGTEMPLATE, DefWindowProcW, DialogBoxIndirectParamW, EN_CHANGE, EndDialog,
     GWLP_WNDPROC, GetDlgItem, GetDlgItemTextW, GetParent, GetWindowLongPtrW, GetWindowRect,
     SWP_NOSIZE, SWP_NOZORDER, SendDlgItemMessageW, SetDlgItemTextW, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, WM_CLOSE, WM_COMMAND, WM_INITDIALOG,
@@ -66,6 +67,39 @@ struct Shared {
     entry: RefCell<Option<Entry>>,
 }
 
+/// What the dialog of this thread holds. The dialog is modal and runs on the
+/// thread that shows it, and every message to it, from this process or from
+/// another, is delivered on that thread. So the state is this thread's own,
+/// found by the handle of the dialog, and nothing is read back from a message
+/// parameter or from a value that another process could have set.
+enum State {
+    Idle,
+    /// The dialog is being made: its first `WM_INITDIALOG` takes this.
+    Waiting(Rc<Shared>),
+    Open(Open),
+}
+
+struct Open {
+    dialog: HWND,
+    shared: Rc<Shared>,
+    /// The window procedure of the code box before it was replaced.
+    code_box_original: isize,
+}
+
+thread_local! {
+    static STATE: RefCell<State> = const { RefCell::new(State::Idle) };
+}
+
+/// The state of the open dialog `hwnd`, when `hwnd` is the dialog.
+fn open_of(hwnd: HWND) -> Option<(Rc<Shared>, isize)> {
+    STATE.with_borrow(|state| match state {
+        State::Open(open) if open.dialog == hwnd => {
+            Some((open.shared.clone(), open.code_box_original))
+        }
+        _ => None,
+    })
+}
+
 /// Shows the dialog over `owner` and waits for it to close. `None` is a
 /// dialog that was cancelled. The boxes are emptied before the dialog goes.
 /// That only one dialog is open at a time is the caller's to see to: the
@@ -78,51 +112,81 @@ pub fn run(owner: HWND, prefill: Option<&str>) -> Result<Option<Entry>, Failed> 
     for (index, byte) in bytes.iter().enumerate() {
         words[index / 4] |= u32::from(*byte) << (8 * (index % 4));
     }
-    let shared = Shared {
+    let shared = Rc::new(Shared {
         prefill: prefill.unwrap_or_default().to_owned(),
         owner,
         formatting: Cell::new(false),
         editing: Cell::new(false),
         entry: RefCell::new(None),
-    };
+    });
+    // One dialog per thread: a dialog that is made while another is open or
+    // being made is refused.
+    let taken = STATE.with_borrow_mut(|state| match state {
+        State::Idle => {
+            *state = State::Waiting(shared.clone());
+            true
+        }
+        _ => false,
+    });
+    if !taken {
+        return Err(Failed);
+    }
     let ended = unsafe {
-        let module = GetModuleHandleW(None).map_err(|_| Failed)?;
-        DialogBoxIndirectParamW(
-            Some(module.into()),
-            words.as_ptr().cast::<DLGTEMPLATE>(),
-            Some(owner),
-            Some(dialog_proc),
-            LPARAM(&shared as *const Shared as isize),
-        )
+        GetModuleHandleW(None).map(|module| {
+            DialogBoxIndirectParamW(
+                Some(module.into()),
+                words.as_ptr().cast::<DLGTEMPLATE>(),
+                Some(owner),
+                Some(dialog_proc),
+                LPARAM(0),
+            )
+        })
+    };
+    // The dialog is gone, or was never made.
+    STATE.with_borrow_mut(|state| *state = State::Idle);
+    let Ok(ended) = ended else {
+        return Err(Failed);
     };
     // `-1` is a dialog that could not be made. Anything else, `0` for a
     // cancel and `1` for OK, leaves the answer in `shared`.
     if ended == -1 {
         return Err(Failed);
     }
-    Ok(shared.entry.into_inner())
+    let entry = shared.entry.borrow_mut().take();
+    Ok(entry)
 }
 
-fn shared_of(hwnd: HWND) -> Option<&'static Shared> {
-    // The pointer is set in `WM_INITDIALOG` to a `Shared` that outlives the
-    // dialog, and is never written through: the fields that change are cells.
-    let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const Shared;
-    unsafe { pointer.as_ref() }
+fn shared_of(hwnd: HWND) -> Option<Rc<Shared>> {
+    open_of(hwnd).map(|(shared, _)| shared)
 }
 
 unsafe extern "system" fn dialog_proc(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
-    lparam: LPARAM,
+    _lparam: LPARAM,
 ) -> isize {
     match message {
         WM_INITDIALOG => {
-            unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, lparam.0) };
-            let Some(shared) = shared_of(hwnd) else {
+            // Only the first one, which is the system's: the state waits for
+            // it. Another one, from anywhere, finds nothing to take and does
+            // nothing. `lparam` is not read.
+            let shared = STATE.with_borrow_mut(|state| {
+                let State::Waiting(shared) = state else {
+                    return None;
+                };
+                let shared = shared.clone();
+                *state = State::Open(Open {
+                    dialog: hwnd,
+                    shared: shared.clone(),
+                    code_box_original: 0,
+                });
+                Some(shared)
+            });
+            let Some(shared) = shared else {
                 return 0;
             };
-            initialize(hwnd, shared);
+            initialize(hwnd, &shared);
             // The focus is set here, so the dialog manager must not.
             0
         }
@@ -136,9 +200,9 @@ unsafe extern "system" fn dialog_proc(
             match (id, notification) {
                 (ID_ADDRESS, EN_CHANGE) => refresh(hwnd),
                 (ID_CODE, EN_CHANGE) if shared.editing.get() => refresh(hwnd),
-                (ID_CODE, EN_CHANGE) => code_changed(hwnd, shared),
+                (ID_CODE, EN_CHANGE) => code_changed(hwnd, &shared),
                 // `BN_CLICKED`, which is also what Enter and Esc send.
-                (ID_OK, 0) => accept(hwnd, shared),
+                (ID_OK, 0) => accept(hwnd, &shared),
                 (ID_CANCEL, 0) => cancel(hwnd),
                 _ => return 0,
             }
@@ -164,24 +228,26 @@ unsafe extern "system" fn code_box_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    // The edit control's own procedure, kept in the user data of the box.
-    let original = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
+    // The state of the dialog, found by the handle of the dialog, and the
+    // edit control's own procedure, kept in it. Without them the message is
+    // left to the default procedure.
+    let found = unsafe { GetParent(hwnd) }
+        .ok()
+        .and_then(|dialog| open_of(dialog).map(|(shared, original)| (dialog, shared, original)));
+    let Some((dialog, shared, original)) = found else {
+        return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
+    };
     // SAFETY: the value was the window procedure of the box when the dialog
     // was set up, which is a function with this signature.
     let original: windows::Win32::UI::WindowsAndMessaging::WNDPROC =
         unsafe { std::mem::transmute(original) };
     let changes = CHANGES_TEXT.contains(&message);
-    let shared = unsafe { GetParent(hwnd) }
-        .ok()
-        .and_then(|dialog| shared_of(dialog).map(|shared| (dialog, shared)));
-    let outer = shared.map(|(_, shared)| shared.editing.replace(changes || shared.editing.get()));
+    let outer = shared.editing.replace(changes || shared.editing.get());
     let result = unsafe { CallWindowProcW(original, hwnd, message, wparam, lparam) };
-    if let (Some((dialog, shared)), Some(outer)) = (shared, outer) {
-        shared.editing.set(outer);
-        // Only the outermost message formats: the text is whole by then.
-        if changes && !outer {
-            code_changed(dialog, shared);
-        }
+    shared.editing.set(outer);
+    // Only the outermost message formats: the text is whole by then.
+    if changes && !outer {
+        code_changed(dialog, &shared);
     }
     result
 }
@@ -220,7 +286,11 @@ fn initialize(hwnd: HWND, shared: &Shared) {
         // The code box formats what is typed or pasted as soon as it is.
         if let Ok(code) = GetDlgItem(Some(hwnd), ID_CODE.into()) {
             let original = GetWindowLongPtrW(code, GWLP_WNDPROC);
-            SetWindowLongPtrW(code, GWLP_USERDATA, original);
+            STATE.with_borrow_mut(|state| {
+                if let State::Open(open) = state {
+                    open.code_box_original = original;
+                }
+            });
             SetWindowLongPtrW(code, GWLP_WNDPROC, code_box_proc as *const () as isize);
         }
     }
@@ -329,7 +399,7 @@ fn accept(hwnd: HWND, shared: &Shared) {
 
 fn cancel(hwnd: HWND) {
     if let Some(shared) = shared_of(hwnd) {
-        clear(hwnd, shared);
+        clear(hwnd, &shared);
     }
     unsafe {
         let _ = EndDialog(hwnd, 0);
@@ -352,7 +422,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, SendMessageW};
     use windows::core::PCWSTR;
 
     use super::*;
@@ -527,6 +597,35 @@ mod tests {
         let entry = shown.unwrap().unwrap();
         assert_eq!(entry.address, "Center:7878");
         assert_eq!(entry.code, "ABC-DEF");
+    }
+
+    #[test]
+    fn a_second_wm_initdialog_from_anywhere_does_nothing() {
+        const WM_INITDIALOG: u32 = 0x0110;
+        let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let driver = drive(|dialog| {
+            set_text(dialog, ID_CODE, "abc");
+            // Sent as another process could send it, with a parameter that
+            // points nowhere. The dialog must neither read it nor start over:
+            // starting over would take the box's own replacement procedure
+            // for the original one, and every message to the box would then
+            // call itself.
+            for lparam in [0isize, 1, 0xdead_beef] {
+                unsafe {
+                    SendMessageW(dialog, WM_INITDIALOG, Some(WPARAM(0)), Some(LPARAM(lparam)));
+                }
+            }
+            // The box still works: typed, pasted and set text are formatted.
+            assert_eq!(text_of(dialog, ID_CODE), "ABC");
+            type_key(dialog, ID_CODE, 'd');
+            assert_eq!(text_of(dialog, ID_CODE), "ABC-D");
+            paste(dialog, ID_CODE, "ef");
+            assert_eq!(text_of(dialog, ID_CODE), "ABC-DEF");
+            click(dialog, ID_CANCEL);
+        });
+        let shown = run(HWND::default(), None);
+        driver.join().unwrap();
+        assert!(shown.unwrap().is_none());
     }
 
     #[test]
