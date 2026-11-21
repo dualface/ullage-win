@@ -11,10 +11,23 @@ const SECONDS_PER_DAY: i64 = 24 * SECONDS_PER_HOUR;
 /// days.
 const DAYS_FROM: i64 = SECONDS_PER_DAY + SECONDS_PER_DAY / 2;
 
-/// The row the strip shows for a card: the one with the least left, the
+/// The names the weekly row goes by, in order of preference: ullage-cli
+/// calls it `weekly-usage` when the window has other metrics as well.
+const WEEKLY_NAMES: [&str; 2] = ["weekly", "weekly-usage"];
+
+/// The row the strip shows for a card: the weekly row, or the row with the
+/// least left when the card has none. `None` for a card without rows.
+pub fn strip_row(card: &UsageCard) -> Option<&UsageRow> {
+    WEEKLY_NAMES
+        .iter()
+        .find_map(|name| card.rows.iter().find(|row| row.name == *name))
+        .or_else(|| lowest_row(card))
+}
+
+/// The row with the least left, the
 /// earlier one on a tie, and the first row when no row has a ratio.
 /// `None` for a card without rows.
-pub fn lowest_row(card: &UsageCard) -> Option<&UsageRow> {
+fn lowest_row(card: &UsageCard) -> Option<&UsageRow> {
     let mut lowest: Option<(&UsageRow, f64)> = None;
     for row in &card.rows {
         let Some(ratio) = row.remaining_ratio else {
@@ -141,6 +154,33 @@ mod tests {
     #[test]
     fn a_card_without_rows_has_no_row() {
         assert!(lowest_row(&card(Vec::new())).is_none());
+    }
+
+    #[test]
+    fn the_weekly_row_wins_even_with_more_left() {
+        let card = card(vec![
+            row("5h", Some(0.1)),
+            row("weekly-usage", Some(0.2)),
+            row("weekly", Some(0.9)),
+        ]);
+        assert_eq!(strip_row(&card).unwrap().name, "weekly");
+    }
+
+    #[test]
+    fn without_weekly_the_weekly_usage_row_wins() {
+        let card = card(vec![row("5h", Some(0.1)), row("weekly-usage", Some(0.9))]);
+        assert_eq!(strip_row(&card).unwrap().name, "weekly-usage");
+    }
+
+    #[test]
+    fn without_a_weekly_row_the_row_with_the_least_left_wins() {
+        let card = card(vec![
+            row("auto", Some(0.5)),
+            row("api", Some(0.2)),
+            row("weekly spend", Some(0.9)),
+        ]);
+        assert_eq!(strip_row(&card).unwrap().name, "api");
+        assert!(strip_row(&card_of("claude", Vec::new())).is_none());
     }
 
     #[test]

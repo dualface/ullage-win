@@ -1,11 +1,12 @@
-//! The compact strip: one line for each account, with its label, the row
-//! with the least left, that row's reading and reset, and a bar.
+//! The compact strip: one line for each account, with its label, the
+//! weekly row (or the row with the least left when there is none), that
+//! row's reading and reset, and a bar. No line names its row.
 
 use ullage_cli::usage_view::{UsageCard, UsageRow};
 
 use super::cards::ContentPad;
 use super::{Align, Content, FontKind, Measure, Rect, Shape, font, text, text_box_width};
-use crate::compact::{labels, lowest_row, reset_text};
+use crate::compact::{labels, reset_text, strip_row};
 use crate::display::{BAR_CELLS, Bar, ReadingText, bar, reading_text};
 use crate::theme::Role;
 
@@ -24,14 +25,10 @@ const COLUMN_GAP: f32 = 8.0;
 const BAR_WIDTH: f32 = 49.0;
 const CELL: (f32, f32) = (4.0, 8.0);
 const CELL_GAP: f32 = 1.0;
-/// A row name never takes more than this, so the account keeps its room.
-const MAX_NAME_WIDTH: f32 = 90.0;
-/// The most room a label keeps for itself before the name and the reading
-/// take theirs: enough for `claude-2` at the default text size. A shorter
-/// label keeps its own width.
+/// The most room a label keeps for itself before the reading takes its
+/// own: enough for `claude-2` at the default text size. A shorter label
+/// keeps its own width.
 const MIN_LABEL_WIDTH: f32 = 60.0;
-/// What follows the name of a metric that is switched off.
-const OFF_MARKER: &str = " off";
 
 /// What one line shows; an account with no row reads `no data`.
 struct Line<'a> {
@@ -52,27 +49,17 @@ pub(super) fn build(
     let value_font = font(FontKind::Mono, 12.0 * scale, 600);
     let prefix_font = font(FontKind::Mono, 11.0 * scale, 400);
     let reset_font = font(FontKind::Mono, 11.0 * scale, 400);
+    let label_font = font(FontKind::Mono, 12.0 * scale, 700);
     let lines: Vec<Line> = cards
         .iter()
         .zip(labels(cards))
         .map(|(card, label)| {
-            let row = lowest_row(card);
+            let row = strip_row(card);
             Line {
                 label,
                 row,
                 reset: row.and_then(|row| row.resets_in).map(reset_text),
             }
-        })
-        .collect();
-    let readings: Vec<ReadingText> = lines
-        .iter()
-        .map(|line| match line.row {
-            Some(row) => reading_text(&row.reading, row.severity),
-            None => ReadingText {
-                prefix: None,
-                value: "no data".into(),
-                color: Role::Faint,
-            },
         })
         .collect();
     // The reset column is as wide as its longest text, and takes no room
@@ -86,14 +73,8 @@ pub(super) fn build(
     let row_height = ROW_HEIGHT * scale;
     let left = PAD_SIDE + ROW_PAD;
     let right = inner_width - PAD_SIDE - ROW_PAD;
-    let name_font = font(FontKind::Mono, 11.0 * scale, 400);
-    let label_font = font(FontKind::Mono, 12.0 * scale, 700);
-    // A name with less room than this is left out rather than shown as a
-    // bare ellipsis.
-    let min_name_w = text_box_width(measure, "mm", name_font);
-
     // Shared columns from the right: bar, reset, then the right edge of the
-    // readings. Each line lays out its own reading, name and label.
+    // readings. Each line lays out its own reading and label.
     let bar_x = right - BAR_WIDTH;
     let reset_right = bar_x - COLUMN_GAP;
     let reading_right = if reset_col > 0.0 {
@@ -102,7 +83,7 @@ pub(super) fn build(
         reset_right
     };
 
-    for (index, (line, reading)) in lines.iter().zip(&readings).enumerate() {
+    for (index, line) in lines.iter().enumerate() {
         let y = index as f32 * row_height;
         body.shapes.push(Shape::Rect {
             rect: Rect::new(PAD_SIDE, y, inner_width - 2.0 * PAD_SIDE, 1.0),
@@ -111,12 +92,13 @@ pub(super) fn build(
             border: None,
         });
 
-        let name = line.row.map(|row| row.name.as_str()).unwrap_or("");
-        let off = line.row.is_some_and(|row| row.off);
-        let off_w = if off {
-            text_box_width(measure, OFF_MARKER, name_font)
-        } else {
-            0.0
+        let reading = match line.row {
+            Some(row) => reading_text(&row.reading, row.severity),
+            None => ReadingText {
+                prefix: None,
+                value: "no data".into(),
+                color: Role::Faint,
+            },
         };
         let label_full = text_box_width(measure, &line.label, label_font);
         let prefix = reading.prefix.map(|word| {
@@ -125,18 +107,11 @@ pub(super) fn build(
                 text_box_width(measure, word, prefix_font) + measure.width(" ", prefix_font),
             )
         });
-        let fit = fit_line(LineWants {
-            room: reading_right - left - label_full.min(MIN_LABEL_WIDTH) - COLUMN_GAP,
-            value: text_box_width(measure, &reading.value, value_font),
-            prefix: prefix.map_or(0.0, |(_, width)| width),
-            name: if name.is_empty() {
-                0.0
-            } else {
-                text_box_width(measure, name, name_font) + off_w
-            },
-            off: off_w,
-            min_name: min_name_w,
-        });
+        let fit = fit_reading(
+            reading_right - left - label_full.min(MIN_LABEL_WIDTH) - COLUMN_GAP,
+            text_box_width(measure, &reading.value, value_font),
+            prefix.map_or(0.0, |(_, width)| width),
+        );
 
         body.shapes.push(text(
             Rect::new(reading_right - fit.value, y, fit.value, row_height),
@@ -148,43 +123,20 @@ pub(super) fn build(
         ));
         let mut reading_left = reading_right - fit.value;
         if let Some((word, width)) = prefix.filter(|_| fit.prefix) {
-            let word_w = text_box_width(measure, word, prefix_font);
             reading_left -= width;
             body.shapes.push(text(
-                Rect::new(reading_left, y, word_w, row_height),
+                Rect::new(
+                    reading_left,
+                    y,
+                    text_box_width(measure, word, prefix_font),
+                    row_height,
+                ),
                 word,
                 prefix_font,
                 Role::Faint,
                 Align::Right,
                 false,
             ));
-        }
-
-        let mut label_right = reading_left - COLUMN_GAP;
-        if fit.name > 0.0 {
-            // The `off` marker follows the name, in the same faint colour,
-            // and is never cut: the name gives way to it.
-            let name_x = label_right - fit.name;
-            let name_box = fit.name - off_w;
-            body.shapes.push(text(
-                Rect::new(name_x, y, name_box, row_height),
-                name,
-                name_font,
-                Role::Faint,
-                Align::Left,
-                true,
-            ));
-            if off {
-                body.shapes.push(text(
-                    Rect::new(name_x + name_box, y, off_w, row_height),
-                    OFF_MARKER,
-                    name_font,
-                    Role::Faint,
-                    Align::Left,
-                    false,
-                ));
-            }
-            label_right = name_x - COLUMN_GAP;
         }
 
         if let Some(reset) = &line.reset {
@@ -218,10 +170,9 @@ pub(super) fn build(
         }
 
         // The label, cut back with an ellipsis when it is too long.
-        let avail = (label_right - left).max(0.0);
-        let label_w = text_box_width(measure, &line.label, label_font).min(avail);
+        let avail = (reading_left - COLUMN_GAP - left).max(0.0);
         body.shapes.push(text(
-            Rect::new(left, y, label_w, row_height),
+            Rect::new(left, y, label_full.min(avail), row_height),
             line.label.clone(),
             label_font,
             Role::Accent,
@@ -232,57 +183,32 @@ pub(super) fn build(
     body.height = lines.len() as f32 * row_height + PAD_BOTTOM;
 }
 
-/// What a line would show in full, as widths, and the room it has between
-/// the label's reserved width and the right edge of the readings.
-struct LineWants {
-    room: f32,
-    value: f32,
-    /// The prefix with the space after it; 0 without a prefix.
-    prefix: f32,
-    /// The name with its `off` marker; 0 without a name.
-    name: f32,
-    off: f32,
-    min_name: f32,
-}
-
-/// What a line shows: the width of its name (0 when left out), whether it
-/// keeps its prefix, and the width of its value.
+/// How a reading is shown: whether it keeps its prefix, and the width of
+/// its value.
 #[derive(Debug, PartialEq)]
-struct LineFit {
-    name: f32,
+struct ReadingFit {
     prefix: bool,
     value: f32,
     value_cut: bool,
 }
 
-/// Fits a line into its room. What does not fit gives way in this order:
-/// the name is cut back (its `off` marker is kept whole), then the name is
-/// left out, then the prefix, and last the value is cut back.
-fn fit_line(wants: LineWants) -> LineFit {
-    let room = wants.room.max(0.0);
-    let reading = wants.value + wants.prefix;
-    let name_room = room - reading - COLUMN_GAP;
-    if wants.name > 0.0 && name_room >= wants.min_name + wants.off {
-        return LineFit {
-            name: wants.name.min(MAX_NAME_WIDTH).min(name_room),
+/// Fits a reading into `room`, the space between the label's reserved
+/// width and the right edge of the readings. `prefix` is the prefix with
+/// the space after it, 0 without one. What does not fit gives way in this
+/// order: the prefix, then the value is cut back.
+fn fit_reading(room: f32, value: f32, prefix: f32) -> ReadingFit {
+    let room = room.max(0.0);
+    if value + prefix <= room {
+        return ReadingFit {
             prefix: true,
-            value: wants.value,
+            value,
             value_cut: false,
         };
     }
-    if reading <= room {
-        return LineFit {
-            name: 0.0,
-            prefix: true,
-            value: wants.value,
-            value_cut: false,
-        };
-    }
-    LineFit {
-        name: 0.0,
+    ReadingFit {
         prefix: false,
-        value: wants.value.min(room),
-        value_cut: wants.value > room,
+        value: value.min(room),
+        value_cut: value > room,
     }
 }
 
@@ -293,7 +219,7 @@ mod tests {
     use super::super::cards::tests::{card, row, sample_cards};
     use super::super::testing::*;
     use super::super::*;
-    use super::{LineFit, LineWants, fit_line};
+    use super::{ReadingFit, fit_reading};
     use crate::prefs::Layout;
 
     fn input<'a>(cards: &'a [UsageCard]) -> Input<'a> {
@@ -331,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn a_line_shows_the_account_row_with_the_least_left() {
+    fn without_a_weekly_row_a_line_shows_the_row_with_the_least_left_unnamed() {
         let cards = vec![card(
             "cursor",
             Some("Ultra"),
@@ -343,8 +269,6 @@ mod tests {
             ],
         )];
         let scene = build(&input(&cards), &FakeMeasure);
-        let name = text_of(&scene.content, "api");
-        assert_eq!((name.font.size, name.color), (11.0, Role::Faint));
         let value = text_of(&scene.content, "18%");
         assert_eq!(
             (value.font.size, value.font.weight, value.color),
@@ -352,11 +276,32 @@ mod tests {
         );
         let provider = text_of(&scene.content, "cursor");
         assert_eq!((provider.font.weight, provider.color), (700, Role::Accent));
-        assert!(!texts(&scene.content).iter().any(|t| t.text == "auto"));
+        let shown: Vec<&str> = texts(&scene.content)
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect();
+        assert_eq!(shown.len(), 2, "only the label and the reading: {shown:?}");
     }
 
     #[test]
-    fn a_selected_row_marked_off_shows_the_faint_off_after_its_name() {
+    fn the_weekly_row_is_shown_even_with_another_row_lower() {
+        let mut cards = sample_cards(1);
+        cards[0].rows[0].reading = Reading::Remaining("10%".into());
+        cards[0].rows[0].remaining_ratio = Some(0.1);
+        let scene = build(&input(&cards), &FakeMeasure);
+        text_of(&scene.content, "73%");
+        text_of(&scene.content, "4d");
+        let shown: Vec<&str> = texts(&scene.content)
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect();
+        for hidden in ["10%", "weekly", "5h", "account-0"] {
+            assert!(!shown.contains(&hidden), "{hidden} is drawn");
+        }
+    }
+
+    #[test]
+    fn a_selected_row_marked_off_shows_no_off_marker() {
         let mut off_row = row("api", Reading::Remaining("18%".into()), Some(0.18), None);
         off_row.off = true;
         let cards = vec![card(
@@ -369,24 +314,12 @@ mod tests {
             ],
         )];
         let scene = build(&input(&cards), &FakeMeasure);
-        let name = text_of(&scene.content, "api");
-        let off = text_of(&scene.content, " off");
-        assert_eq!(off.color, Role::Faint);
-        assert_eq!(off.rect.x, name.rect.right());
-        // Without the marker there is no `off`.
-        let plain = vec![card(
-            "cursor",
-            None,
-            "account-5",
-            vec![row(
-                "api",
-                Reading::Remaining("18%".into()),
-                Some(0.18),
-                None,
-            )],
-        )];
-        let scene = build(&input(&plain), &FakeMeasure);
-        assert!(!texts(&scene.content).iter().any(|t| t.text == " off"));
+        text_of(&scene.content, "18%");
+        assert!(
+            !texts(&scene.content)
+                .iter()
+                .any(|t| t.text.contains("off") || t.text == "api")
+        );
     }
 
     #[test]
@@ -439,9 +372,7 @@ mod tests {
     #[test]
     fn the_reading_column_is_shared_and_right_aligned() {
         let mut cards = sample_cards(2);
-        cards[1].rows[0].reading = Reading::Credits("120 of 500".into());
-        cards[1].rows[0].remaining_ratio = Some(0.05);
-        cards[1].rows[1].remaining_ratio = Some(0.9);
+        cards[1].rows[1].reading = Reading::Credits("120 of 500".into());
         let scene = build(&input(&cards), &FakeMeasure);
         let first = text_of(&scene.content, "73%");
         let second = text_of(&scene.content, "120 of 500");
@@ -481,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn a_long_label_is_cut_back_before_it_touches_the_name() {
+    fn a_long_label_is_cut_back_before_it_touches_the_reading() {
         let cards = vec![card(
             "a-provider-with-a-very-long-name",
             None,
@@ -495,9 +426,9 @@ mod tests {
         )];
         let scene = build(&input(&cards), &FakeMeasure);
         let label = text_of(&scene.content, "a-provider-with-a-very-long-name");
-        let name = text_of(&scene.content, "monthly");
+        let reading = text_of(&scene.content, "99%");
         assert!(label.ellipsis);
-        assert!(label.rect.right() <= name.rect.x);
+        assert_eq!(label.rect.right() + 8.0, reading.rect.x);
     }
 
     #[test]
@@ -518,14 +449,14 @@ mod tests {
             .iter()
             .map(|t| t.text.as_str())
             .collect();
-        for account in ["account-0", "account-1", "account-9"] {
-            assert!(!shown.contains(&account), "{account} is drawn");
+        for hidden in ["account-0", "account-1", "account-9", "weekly", "5h"] {
+            assert!(!shown.contains(&hidden), "{hidden} is drawn");
         }
     }
 
     #[test]
     fn the_reset_sits_between_the_reading_and_the_bar() {
-        // The weekly row, 4 days off, has the least left.
+        // The weekly row, 4 days off.
         let cards = sample_cards(1);
         let scene = build(&input(&cards), &FakeMeasure);
         let reset = text_of(&scene.content, "4d");
@@ -554,7 +485,7 @@ mod tests {
             vec![
                 row("5h", Reading::Remaining("50%".into()), Some(0.5), None),
                 row(
-                    "weekly",
+                    "auto",
                     Reading::Remaining("90%".into()),
                     Some(0.9),
                     Some(3600),
@@ -621,8 +552,7 @@ mod tests {
     fn a_wide_reading_and_a_reset_leave_the_label_its_room() {
         let mut cards = sample_cards(2);
         cards[0].rows[1].resets_in = Some(36 * 3600);
-        cards[1].rows[0].reading = Reading::Credits("120 of 500".into());
-        cards[1].rows[0].remaining_ratio = Some(0.05);
+        cards[1].rows[1].reading = Reading::Credits("120 of 500".into());
         let scene = build(&input(&cards), &FakeMeasure);
         for label in ["claude-1", "claude-2"] {
             // Eight 7.2 DIP characters, rounded up, plus one: not cut back.
@@ -630,19 +560,15 @@ mod tests {
         }
         text_of(&scene.content, "36h00m");
         assert!(!text_of(&scene.content, "120 of 500").ellipsis);
-        // The wide reading's own line gives up its name and prefix; the
-        // other line keeps its name.
+        // The wide reading gives up its prefix.
         assert!(!texts(&scene.content).iter().any(|t| t.text == "credits"));
-        assert_eq!(text_of(&scene.content, "weekly").rect.y, 0.0);
-        assert!(!texts(&scene.content).iter().any(|t| t.text == "5h"));
         assert_lines_fit(&scene);
     }
 
     #[test]
     fn a_value_wider_than_its_room_is_cut_back_with_an_ellipsis() {
         let mut cards = sample_cards(1);
-        cards[0].rows[0].reading = Reading::Credits("123456789 of 999999999".into());
-        cards[0].rows[0].remaining_ratio = Some(0.05);
+        cards[0].rows[1].reading = Reading::Credits("123456789 of 999999999".into());
         let scene = build(&input(&cards), &FakeMeasure);
         assert!(text_of(&scene.content, "123456789 of 999999999").ellipsis);
         // The label is not cut back: 6 × 7.2 DIPs, rounded up, plus one.
@@ -651,12 +577,12 @@ mod tests {
     }
 
     #[test]
-    fn readings_that_fit_keep_their_prefix_and_names() {
+    fn a_reading_that_fits_keeps_its_prefix() {
         let mut cards = sample_cards(1);
         cards[0].rows[1].reading = Reading::Used("12%".into());
         let scene = build(&input(&cards), &FakeMeasure);
-        text_of(&scene.content, "used");
-        text_of(&scene.content, "weekly");
+        let used = text_of(&scene.content, "used");
+        assert_eq!(used.color, Role::Faint);
         assert_lines_fit(&scene);
     }
 
@@ -664,8 +590,7 @@ mod tests {
     fn one_wide_reading_does_not_take_the_prefix_of_another_line() {
         let mut cards = sample_cards(2);
         cards[0].rows[1].resets_in = Some(36 * 3600);
-        cards[0].rows[0].reading = Reading::Credits("12 of 50".into());
-        cards[0].rows[0].remaining_ratio = Some(0.05);
+        cards[0].rows[1].reading = Reading::Credits("12 of 50".into());
         cards[1].rows[1].reading = Reading::Used("12%".into());
         let scene = build(&input(&cards), &FakeMeasure);
         assert!(!texts(&scene.content).iter().any(|t| t.text == "credits"));
@@ -680,42 +605,10 @@ mod tests {
     }
 
     #[test]
-    fn a_name_marked_off_shows_the_whole_marker() {
-        let mut off_row = row(
-            "api",
-            Reading::Remaining("12%".into()),
-            Some(0.18),
-            Some(36 * 3600),
-        );
-        off_row.off = true;
-        let cards = vec![card("cursor", None, "account-5", vec![off_row])];
-        let scene = build(&input(&cards), &FakeMeasure);
-        let name = text_of(&scene.content, "api");
-        let off = text_of(&scene.content, " off");
-        // ` off` is four 6.6 DIP characters, rounded up, plus one.
-        assert_eq!(off.rect.w, 28.0);
-        assert_eq!(off.rect.x, name.rect.right());
-        assert_lines_fit(&scene);
-    }
-
-    fn wants(room: f32, value: f32, prefix: f32, name: f32, off: f32) -> LineWants {
-        LineWants {
-            room,
-            value,
-            prefix,
-            name,
-            off,
-            min_name: 15.0,
-        }
-    }
-
-    #[test]
-    fn a_line_with_room_shows_everything() {
-        let fit = fit_line(wants(100.0, 30.0, 20.0, 40.0, 0.0));
+    fn a_reading_with_room_keeps_its_prefix() {
         assert_eq!(
-            fit,
-            LineFit {
-                name: 40.0,
+            fit_reading(100.0, 30.0, 20.0),
+            ReadingFit {
                 prefix: true,
                 value: 30.0,
                 value_cut: false
@@ -724,30 +617,23 @@ mod tests {
     }
 
     #[test]
-    fn the_name_is_cut_back_first_and_keeps_its_off_marker() {
-        // 110 - 50 - 8 leaves 52 for a 68 DIP name with a 28 DIP marker.
-        let fit = fit_line(wants(110.0, 30.0, 20.0, 68.0, 28.0));
-        assert_eq!((fit.name, fit.prefix), (52.0, true));
-        // Less than two characters and the marker: the name is left out
-        // while the prefix stays.
-        let fit = fit_line(wants(90.0, 30.0, 20.0, 68.0, 28.0));
-        assert_eq!((fit.name, fit.prefix, fit.value), (0.0, true, 30.0));
-    }
-
-    #[test]
     fn the_prefix_goes_before_the_value_is_cut() {
-        let fit = fit_line(wants(40.0, 30.0, 20.0, 40.0, 0.0));
         assert_eq!(
-            fit,
-            LineFit {
-                name: 0.0,
+            fit_reading(40.0, 30.0, 20.0),
+            ReadingFit {
                 prefix: false,
                 value: 30.0,
                 value_cut: false
             }
         );
-        let fit = fit_line(wants(25.0, 30.0, 20.0, 0.0, 0.0));
-        assert_eq!((fit.value, fit.value_cut), (25.0, true));
-        assert_eq!(fit_line(wants(-5.0, 30.0, 0.0, 0.0, 0.0)).value, 0.0);
+        assert_eq!(
+            fit_reading(25.0, 30.0, 20.0),
+            ReadingFit {
+                prefix: false,
+                value: 25.0,
+                value_cut: true
+            }
+        );
+        assert_eq!(fit_reading(-5.0, 30.0, 0.0).value, 0.0);
     }
 }

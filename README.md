@@ -7,11 +7,12 @@ drawn as a modern Windows window instead of a terminal screen.
 
 - A borderless window that stays on top, with a tray icon.
 - Three layouts: two columns, one card per row, and a compact strip with one
-  line per account. A strip line shows the row with the least left and how
-  long until it resets: whole days above a day and a half (`2d`), otherwise
+  line per account. A strip line shows the account's weekly usage, or the
+  row with the least left when the account has no weekly row, and how long
+  until it resets: whole days above a day and a half (`2d`), otherwise
   hours and minutes (`5h03m`). It names the account by its provider only,
   numbered when the provider has more than one account (`claude-1`,
-  `claude-2`), and leaves out the account name.
+  `claude-2`), and leaves out the account name and the name of the row.
 - Follows the system light and dark setting.
 - Refreshes every 2 minutes. It only reads: it signs in to nothing and changes
   no account. The one thing it does to a remote daemon is that pairing
