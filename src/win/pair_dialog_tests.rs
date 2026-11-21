@@ -236,13 +236,6 @@ fn ok_does_nothing_until_the_input_is_good_and_cancel_sends_nothing() {
     assert!(shown.unwrap().is_none());
 }
 
-/// What `DM_GETDEFID` says the default button is.
-fn default_id(dialog: HWND) -> u16 {
-    const DM_GETDEFID: u32 = 0x0400;
-    let answer = unsafe { SendMessageW(dialog, DM_GETDEFID, None, None) }.0;
-    (answer & 0xFFFF) as u16
-}
-
 /// Moves the keyboard focus to the control `id`, as Tab does.
 fn focus(dialog: HWND, id: u16) {
     const WM_NEXTDLGCTL: u32 = 0x0028;
@@ -257,28 +250,43 @@ fn focus(dialog: HWND, id: u16) {
     }
 }
 
+/// Presses Enter: the key goes through the message loop of the dialog, which
+/// gives it to the button that has the focus, or else to the default button.
+fn press_enter(dialog: HWND) {
+    const VK_RETURN: usize = 0x0D;
+    unsafe {
+        PostMessageW(Some(dialog), WM_KEYDOWN, WPARAM(VK_RETURN), LPARAM(0)).unwrap();
+    }
+}
+
 #[test]
-fn enter_presses_the_button_that_has_the_focus_and_the_main_one_otherwise() {
+fn enter_in_a_box_pairs() {
     let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
     let driver = drive(|dialog| {
-        // In a box, and on the main button, Enter is the main button.
-        focus(dialog, ID_ADDRESS);
-        assert_eq!(default_id(dialog), ID_OK);
+        set_text(dialog, ID_CODE, "abcdef");
         focus(dialog, ID_CODE);
-        assert_eq!(default_id(dialog), ID_OK);
-        focus(dialog, ID_OK);
-        assert_eq!(default_id(dialog), ID_OK);
-        // On Cancel, Enter is Cancel: it does not pair.
-        focus(dialog, ID_CANCEL);
-        assert_eq!(default_id(dialog), ID_CANCEL);
-        // And back.
-        focus(dialog, ID_CODE);
-        assert_eq!(default_id(dialog), ID_OK);
-        click(dialog, ID_CANCEL);
+        press_enter(dialog);
     });
-    let shown = run(HWND::default(), Some("center:7878"));
+    let shown = run(HWND::default(), Some("100.71.140.68:7878"));
     driver.join().unwrap();
-    assert!(shown.unwrap().is_none());
+    let entry = shown.unwrap().expect("Enter in a box is the main button");
+    assert_eq!(entry.address, "100.71.140.68:7878");
+    assert_eq!(entry.code, "ABC-DEF");
+}
+
+#[test]
+fn enter_on_cancel_cancels_and_does_not_pair() {
+    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let driver = drive(|dialog| {
+        // The input is whole, so that the main button would pair.
+        set_text(dialog, ID_CODE, "abcdef");
+        assert!(enabled(dialog, ID_OK));
+        focus(dialog, ID_CANCEL);
+        press_enter(dialog);
+    });
+    let shown = run(HWND::default(), Some("100.71.140.68:7878"));
+    driver.join().unwrap();
+    assert!(shown.unwrap().is_none(), "Enter on Cancel is Cancel");
 }
 
 #[test]

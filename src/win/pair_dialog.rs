@@ -748,7 +748,7 @@ fn layout(hwnd: HWND, ui: &Ui) {
     };
     let frame = frame(&model, ui.typography());
     let dpi = ui.dpi();
-    let (width, height, _, _) = to_pixels(Rect::new(0.0, 0.0, frame.size.0, frame.size.1), dpi);
+    let (_, _, width, height) = to_pixels(Rect::new(0.0, 0.0, frame.size.0, frame.size.1), dpi);
     unsafe {
         // The outer size is the size of the client area, and the frame and
         // the title bar of the dialog at this DPI.
