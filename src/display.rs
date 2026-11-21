@@ -6,7 +6,7 @@ use ullage_cli::usage_view::{Reading, Severity, UsageRow};
 
 use crate::theme::Role;
 
-/// Cells in a progress bar.
+/// Cells in the progress bar of a card row.
 pub const BAR_CELLS: u8 = 10;
 
 /// A reading split into the faint prefix and the coloured value.
@@ -17,8 +17,8 @@ pub struct ReadingText {
     pub color: Role,
 }
 
-/// A progress bar: how many of the ten cells are filled, from the right,
-/// and in which colour.
+/// A progress bar: how many of its cells are filled, from the right, and in
+/// which colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bar {
     pub filled: u8,
@@ -60,11 +60,12 @@ pub fn reading_text(reading: &Reading, severity: Option<Severity>) -> ReadingTex
 }
 
 /// The bar of a row, or `None` when the row has none.
-pub fn bar(row: &UsageRow) -> Option<Bar> {
+/// The bar of `row` drawn with `cells` cells.
+pub fn bar(row: &UsageRow, cells: u8) -> Option<Bar> {
     match row.reading {
         Reading::CreditsUnlimited => {
             return Some(Bar {
-                filled: BAR_CELLS,
+                filled: cells,
                 color: Role::Ample,
             });
         }
@@ -78,7 +79,7 @@ pub fn bar(row: &UsageRow) -> Option<Bar> {
         _ => {}
     }
     let ratio = row.remaining_ratio?;
-    let filled = (ratio.clamp(0.0, 1.0) * f64::from(BAR_CELLS)).round() as u8;
+    let filled = (ratio.clamp(0.0, 1.0) * f64::from(cells)).round() as u8;
     Some(Bar {
         filled,
         color: row.severity.map_or(Role::Text, severity_role),
@@ -169,50 +170,74 @@ mod tests {
 
     #[test]
     fn bar_fills_round_half_up_from_the_remaining_ratio() {
-        let filled = |ratio: f64| {
-            bar(&row(
-                Reading::Remaining("x".into()),
-                Some(ratio),
-                Some(Severity::of(ratio)),
-            ))
+        let filled = |ratio: f64, cells: u8| {
+            bar(
+                &row(
+                    Reading::Remaining("x".into()),
+                    Some(ratio),
+                    Some(Severity::of(ratio)),
+                ),
+                cells,
+            )
             .unwrap()
             .filled
         };
-        assert_eq!(filled(1.0), 10);
-        assert_eq!(filled(0.83), 8);
-        assert_eq!(filled(0.85), 9);
-        assert_eq!(filled(0.54), 5);
-        assert_eq!(filled(0.045), 0);
-        assert_eq!(filled(0.05), 1);
-        assert_eq!(filled(0.0), 0);
+        assert_eq!(filled(1.0, 10), 10);
+        assert_eq!(filled(0.83, 10), 8);
+        assert_eq!(filled(0.85, 10), 9);
+        assert_eq!(filled(0.54, 10), 5);
+        assert_eq!(filled(0.045, 10), 0);
+        assert_eq!(filled(0.05, 10), 1);
+        assert_eq!(filled(0.0, 10), 0);
+        // Five cells: each is a fifth.
+        assert_eq!(filled(1.0, 5), 5);
+        assert_eq!(filled(0.73, 5), 4);
+        assert_eq!(filled(0.69, 5), 3);
+        assert_eq!(filled(0.09, 5), 0);
+        assert_eq!(filled(0.1, 5), 1);
     }
 
     #[test]
     fn bar_takes_the_colour_of_the_reading() {
-        let low = bar(&row(
-            Reading::Used("80%".into()),
-            Some(0.2),
-            Some(Severity::Low),
-        ))
+        let low = bar(
+            &row(Reading::Used("80%".into()), Some(0.2), Some(Severity::Low)),
+            BAR_CELLS,
+        )
         .unwrap();
         assert_eq!((low.filled, low.color), (2, Role::Low));
     }
 
     #[test]
     fn unlimited_is_a_full_ample_bar_and_used_up_an_empty_critical_one() {
-        let full = bar(&row(Reading::CreditsUnlimited, None, None)).unwrap();
+        let full = bar(&row(Reading::CreditsUnlimited, None, None), BAR_CELLS).unwrap();
         assert_eq!((full.filled, full.color), (10, Role::Ample));
-        let empty = bar(&row(Reading::UsedUp, Some(0.0), Some(Severity::Critical))).unwrap();
+        let empty = bar(
+            &row(Reading::UsedUp, Some(0.0), Some(Severity::Critical)),
+            BAR_CELLS,
+        )
+        .unwrap();
         assert_eq!((empty.filled, empty.color), (0, Role::Crit));
     }
 
     #[test]
     fn rows_without_a_ratio_have_no_bar() {
-        assert_eq!(bar(&row(Reading::Balance("$1".into()), None, None)), None);
-        assert_eq!(bar(&row(Reading::Spent("$1".into()), None, None)), None);
-        assert_eq!(bar(&row(Reading::Disabled, None, None)), None);
-        assert_eq!(bar(&row(Reading::Credits("5".into()), None, None)), None);
-        assert_eq!(bar(&row(Reading::Remaining("-".into()), None, None)), None);
+        assert_eq!(
+            bar(&row(Reading::Balance("$1".into()), None, None), BAR_CELLS),
+            None
+        );
+        assert_eq!(
+            bar(&row(Reading::Spent("$1".into()), None, None), BAR_CELLS),
+            None
+        );
+        assert_eq!(bar(&row(Reading::Disabled, None, None), BAR_CELLS), None);
+        assert_eq!(
+            bar(&row(Reading::Credits("5".into()), None, None), BAR_CELLS),
+            None
+        );
+        assert_eq!(
+            bar(&row(Reading::Remaining("-".into()), None, None), BAR_CELLS),
+            None
+        );
     }
 
     #[test]

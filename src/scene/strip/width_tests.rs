@@ -64,7 +64,7 @@ fn box_of(chars: usize, size: f32) -> f32 {
 fn four_accounts_with_percentages_are_narrower_than_the_old_strip() {
     let cards = four_remaining();
     let scene = build(&input(&cards), &FakeMeasure);
-    assert_eq!(scene.width, 229.0);
+    assert_eq!(scene.width, 204.0);
     assert!(scene.width < 250.0);
     assert_lines_fit(&scene);
 }

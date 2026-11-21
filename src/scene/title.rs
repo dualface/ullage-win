@@ -445,10 +445,9 @@ mod tests {
         input.body = Body::Cards(&cards);
         input.countdown = (1.0, 120);
         let scene = build(&input, &FakeMeasure);
-        // One short label: the strip is as narrow as it gets, and the bar
-        // needs less than that.
-        assert_eq!(scene.width, MIN_WIDTH_COMPACT);
-        assert!(title::strip_min_width(&FakeMeasure) <= MIN_WIDTH_COMPACT);
+        // One short label: the strip is about as narrow as it gets.
+        assert!(scene.width >= title::strip_min_width(&FakeMeasure));
+        assert!(scene.width < 180.0);
         let pieces = strip_pieces(&scene);
         for (name, rect) in &pieces {
             assert!(

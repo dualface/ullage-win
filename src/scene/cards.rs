@@ -334,7 +334,7 @@ fn row_shapes(
     reading_shapes(body, row, reading_right, y, height, sizes, measure);
     reset_shapes(body, row, reset_right, y, height, sizes, measure);
 
-    if let Some(Bar { filled, color }) = bar(row) {
+    if let Some(Bar { filled, color }) = bar(row, BAR_CELLS) {
         let top = y + (height - CELL.1) / 2.0;
         for cell in 0..BAR_CELLS {
             let lit = cell >= BAR_CELLS - filled;

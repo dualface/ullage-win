@@ -9,7 +9,7 @@ use super::{
     Align, BORDER, Content, Font, FontKind, Measure, Rect, Shape, font, text, text_box_width,
 };
 use crate::compact::{labels, reset_text, strip_row};
-use crate::display::{BAR_CELLS, Bar, ReadingText, bar, reading_text};
+use crate::display::{Bar, ReadingText, bar, reading_text};
 use crate::theme::Role;
 
 const PAD_SIDE: f32 = 4.0;
@@ -24,9 +24,12 @@ pub(super) const CONTENT_PAD: ContentPad = ContentPad {
 const ROW_HEIGHT: f32 = 28.0;
 const ROW_PAD: f32 = 8.0;
 const COLUMN_GAP: f32 = 8.0;
-const BAR_WIDTH: f32 = 49.0;
+/// The strip's bar has half the cells of a card's, so that the window is
+/// narrower; a cell is a fifth of the row.
+const BAR_CELLS: u8 = 5;
 const CELL: (f32, f32) = (4.0, 8.0);
 const CELL_GAP: f32 = 1.0;
+const BAR_WIDTH: f32 = BAR_CELLS as f32 * CELL.0 + (BAR_CELLS - 1) as f32 * CELL_GAP;
 /// The most room a label keeps for itself before the reading takes its
 /// own: enough for `claude-2` at the default text size. A shorter label
 /// keeps its own width.
@@ -230,7 +233,7 @@ pub(super) fn build(
             ));
         }
 
-        if let Some(Bar { filled, color }) = line.row.and_then(bar) {
+        if let Some(Bar { filled, color }) = line.row.and_then(|row| bar(row, BAR_CELLS)) {
             let top = y + (row_height - CELL.1) / 2.0;
             for cell in 0..BAR_CELLS {
                 let lit = cell >= BAR_CELLS - filled;
@@ -320,7 +323,7 @@ mod tests {
     fn each_account_is_one_28_dip_line_with_a_divider() {
         let cards = sample_cards(3);
         let scene = build(&input(&cards), &FakeMeasure);
-        assert_eq!(scene.width, 229.0);
+        assert_eq!(scene.width, 204.0);
         assert_eq!(scene.content_height, 3.0 * 28.0 + 4.0);
         let dividers: Vec<f32> = scene
             .content
@@ -380,7 +383,7 @@ mod tests {
         for hidden in ["10%", "weekly", "5h", "account-0"] {
             assert!(!shown.contains(&hidden), "{hidden} is drawn");
         }
-        // The bar is the weekly row's too: 73% lights seven cells.
+        // The bar is the weekly row's too: 73% lights four cells of five.
         let lit = scene
             .content
             .iter()
@@ -389,19 +392,21 @@ mod tests {
                     if *radius == 1.0 && rect.w == 4.0 && *role != Role::Track)
             })
             .count();
-        assert_eq!(lit, 7);
+        assert_eq!(lit, 4);
     }
 
     #[test]
     fn a_label_wider_than_its_reserved_room_keeps_that_room() {
         let mut cards = sample_cards(1);
-        cards[0].title.provider = "openrouter".into();
-        cards[0].rows[1].reading = Reading::Credits("1234 of 50000".into());
+        // A label long enough to cap the window.
+        cards[0].title.provider = "openrouter-business".into();
+        cards[0].rows[1].reading = Reading::Credits("123456 of 50000000".into());
         cards[0].rows[1].resets_in = Some(36 * 3600);
         let scene = build(&input(&cards), &FakeMeasure);
-        let label = text_of(&scene.content, "openrouter");
+        assert_eq!(scene.width, MAX_WIDTH_COMPACT);
+        let label = text_of(&scene.content, "openrouter-business");
         assert_eq!(label.rect.w, 60.0);
-        assert!(text_of(&scene.content, "1234 of 50000").ellipsis);
+        assert!(text_of(&scene.content, "123456 of 50000000").ellipsis);
         assert_lines_fit(&scene);
     }
 
@@ -428,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn the_bar_has_ten_cells_of_four_by_eight() {
+    fn the_bar_has_five_cells_of_four_by_eight() {
         let cards = sample_cards(1);
         let scene = build(&input(&cards), &FakeMeasure);
         let cells: Vec<(Rect, Role)> = scene
@@ -444,16 +449,16 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(cells.len(), 10);
+        assert_eq!(cells.len(), 5);
         assert_eq!(cells[1].0.x - cells[0].0.x, 5.0);
         assert!(cells.iter().all(|(rect, _)| rect.h == 8.0));
-        // 73% remaining: seven cells lit from the right.
+        // 73% remaining: four cells lit from the right.
         assert_eq!(
             cells
                 .iter()
                 .filter(|(_, role)| *role == Role::Ample)
                 .count(),
-            7
+            4
         );
         assert_eq!(cells[0].1, Role::Track);
     }
@@ -471,7 +476,7 @@ mod tests {
             .iter()
             .filter(|shape| matches!(shape, Shape::Rect { radius, rect, .. } if *radius == 1.0 && rect.w == 4.0))
             .count();
-        assert_eq!(cells, 10, "only the first account has a bar");
+        assert_eq!(cells, 5, "only the first account has a bar");
     }
 
     #[test]
@@ -574,8 +579,8 @@ mod tests {
         );
         let reading = text_of(&scene.content, "73%");
         // The window's width, less the 1 DIP frame, 4 of padding and 8 inside
-        // the row: the bar starts 49 DIPs further left, the reset 8 before it.
-        let bar_x = scene.width - 2.0 - 4.0 - 8.0 - 49.0;
+        // the row: the bar starts 24 DIPs further left, the reset 8 before it.
+        let bar_x = scene.width - 2.0 - 4.0 - 8.0 - 24.0;
         assert_eq!(reset.rect.right(), bar_x - 8.0);
         assert!(reading.rect.right() + 8.0 <= reset.rect.x);
     }
@@ -612,7 +617,7 @@ mod tests {
         assert_eq!(resets, 2, "the codex and grok lines have no reset");
         // The reading column ends before the reset column, which is as wide as
         // `36h00m`: 6 characters of 6.6 DIPs, rounded up, plus one.
-        let reset_right = scene.width - 2.0 - 4.0 - 8.0 - 49.0 - 8.0;
+        let reset_right = scene.width - 2.0 - 4.0 - 8.0 - 24.0 - 8.0;
         assert_eq!(days.rect.right(), reset_right);
         let reading = text_of(&scene.content, "50%");
         assert_eq!(reading.rect.right(), reset_right - 41.0 - 8.0);
@@ -630,7 +635,7 @@ mod tests {
         let reading = text_of(&scene.content, "50%");
         assert_eq!(
             reading.rect.right(),
-            scene.width - 2.0 - 4.0 - 8.0 - 49.0 - 8.0 - 41.0 - 8.0
+            scene.width - 2.0 - 4.0 - 8.0 - 24.0 - 8.0 - 41.0 - 8.0
         );
     }
 

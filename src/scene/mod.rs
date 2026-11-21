@@ -27,8 +27,6 @@ pub const WIDTH_SINGLE: f32 = 400.0;
 /// The widest the compact strip gets, and the width of its loading and empty
 /// states.
 pub const MAX_WIDTH_COMPACT: f32 = 290.0;
-/// The narrowest the compact strip gets.
-pub const MIN_WIDTH_COMPACT: f32 = 200.0;
 /// Space kept free below a window that fills the work area.
 pub const WORK_AREA_MARGIN: f32 = 32.0;
 /// Lines a wheel notch scrolls, times the height of a line.
@@ -287,9 +285,8 @@ impl Scene {
 }
 
 /// The width of the window. The compact strip with accounts is as wide as
-/// its title bar and its widest line need, between [`MIN_WIDTH_COMPACT`] and
-/// [`MAX_WIDTH_COMPACT`]; that depends on the labels and the kinds of
-/// reading, never on a number. The other windows have a fixed width.
+/// its title bar and its widest line need, at most [`MAX_WIDTH_COMPACT`];
+/// that depends on the labels and the kinds of reading, never on a number. The other windows have a fixed width.
 pub fn window_width(layout: Layout, body: &Body, text_size: u32, measure: &dyn Measure) -> f32 {
     match (layout, body) {
         (Layout::Columns, _) => WIDTH_COLUMNS,
@@ -298,7 +295,7 @@ pub fn window_width(layout: Layout, body: &Body, text_size: u32, measure: &dyn M
             let scale = text_size as f32 / BASE_TEXT_SIZE;
             title::strip_min_width(measure)
                 .max(strip::needed_width(cards, scale, measure))
-                .clamp(MIN_WIDTH_COMPACT, MAX_WIDTH_COMPACT)
+                .min(MAX_WIDTH_COMPACT)
         }
         (Layout::Compact, _) => MAX_WIDTH_COMPACT,
     }

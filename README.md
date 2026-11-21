@@ -14,7 +14,9 @@ the compact strip shows less (see below).
   hours and minutes (`5h03m`). It names the account by its provider only,
   numbered when the provider has more than one account (`claude-1`,
   `claude-2`), and leaves out the account name and the name of the row.
-  The strip is as wide as its longest line needs, at most 290 DIPs. Its
+  Its bar has five cells, each a fifth of the row; a card's bar has ten.
+  The strip is as wide as its longest line needs, at most 290 DIPs, and
+  never narrower than its title bar needs. Its
   width is set by the longest account label and by the widest kind of
   reading on any line (`unlimited` is wider than a percentage, and a used
   amount carries a `used` prefix). It does not change with the usage numbers
