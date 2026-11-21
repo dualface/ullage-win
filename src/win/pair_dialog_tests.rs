@@ -282,6 +282,40 @@ fn paint_on_window(dialog: HWND) {
     }
 }
 
+/// Presses a button and returns when the dialog has handled it: the message
+/// is sent, not posted, so what is asserted next is after the press.
+fn press(dialog: HWND, id: u16) {
+    const WM_COMMAND: u32 = 0x0111;
+    let button = unsafe { GetDlgItem(Some(dialog), id.into()) }.unwrap();
+    unsafe {
+        // `BN_CLICKED` is 0 in the high word.
+        SendMessageW(
+            dialog,
+            WM_COMMAND,
+            Some(WPARAM(usize::from(id))),
+            Some(LPARAM(button.0 as isize)),
+        );
+    }
+}
+
+/// Like `paint_on_window`, with a device context of `rows` pixels high: what
+/// is below is cut off, as when a window is partly off the screen.
+fn paint_on_window_cropped(dialog: HWND, rows: i32) {
+    let mut rect = RECT::default();
+    unsafe {
+        let _ = GetClientRect(dialog, &mut rect);
+    }
+    let surface = crate::win::surface::Surface::new(rect.right.max(1), rows.max(1)).unwrap();
+    unsafe {
+        SendMessageW(
+            dialog,
+            TEST_PAINT_WINDOW,
+            Some(WPARAM(surface.hdc.0 as usize)),
+            None,
+        );
+    }
+}
+
 /// Has the dialog print itself into memory, as a picture of it does. That
 /// is not the screen.
 fn print_to_memory(dialog: HWND) {
@@ -537,20 +571,27 @@ fn shoot(dialog: HWND, name: &str, mode: Mode) {
                 Some(LPARAM(PRINT_ALL as isize)),
             );
         }
-        write_address(dialog, &surface, rect, mode);
+        // The text of the address box is added to a picture of the window
+        // only when the window drew itself: it is not to cover a blank one.
+        if !one_colour(&mut surface) {
+            write_address(dialog, &surface, rect, mode);
+        }
     }
     // Last, when the window gave nothing: the scene of the dialog, drawn the
-    // way the dialog draws it (`Ui`), without the native controls.
+    // way the dialog draws it (`Ui`), with its buttons, but without the
+    // native controls.
     if one_colour(&mut surface) {
         surface = crate::win::surface::Surface::new(width, height).unwrap();
         let ui = Ui::new(mode, 96).unwrap();
-        let _ = ui.draw_dialog(
+        ui.draw_dialog_with_buttons(
             surface.hdc,
             (width, height),
             &text_of(dialog, ID_ADDRESS),
-            false,
-        );
+            enabled(dialog, ID_OK),
+        )
+        .expect("the scene of the dialog is drawn");
     }
+    assert!(!one_colour(&mut surface), "the picture of {name} is blank");
     let pixels = surface.pixels_mut();
     // The alpha of a window that is drawn by the system can be 0.
     for pixel in pixels.as_chunks_mut::<4>().0 {
@@ -716,33 +757,46 @@ fn the_window_prints_itself_in_the_colours_of_the_mode() {
 fn a_path_that_is_not_encrypted_is_paired_with_only_after_its_note_was_drawn() {
     let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
     let driver = drive(|dialog| {
+        let still_there = |dialog: HWND| unsafe { IsWindow(Some(dialog)) }.as_bool();
         // The code is whole. The address is typed, and the main button is
-        // pressed at once: the press is queued before the note is drawn, and
-        // is not the user's word.
+        // pressed at once: nothing has been drawn, and the press is not the
+        // user's word.
         set_text(dialog, ID_CODE, "abcdef");
         set_text(dialog, ID_ADDRESS, "center:7878");
-        click(dialog, ID_OK);
-        // The dialog has handled the press (a message after it is answered
-        // only after it), and is still there.
-        let still_there = |dialog: HWND| {
-            unsafe {
-                SendMessageW(dialog, 0x0000, None, None);
-            }
-            unsafe { IsWindow(Some(dialog)) }.as_bool()
-        };
+        press(dialog, ID_OK);
         assert!(still_there(dialog), "paired too early");
         // A print into memory is not the screen: it does not count either.
         print_to_memory(dialog);
-        click(dialog, ID_OK);
+        press(dialog, ID_OK);
         assert!(still_there(dialog), "paired after a print into memory");
-        // Once the note is on the window, the next press counts.
+        // A window that is partly off the screen is drawn with the part that
+        // shows: the note is below the address box, and is cut off.
+        let note_top = {
+            let address = unsafe { GetDlgItem(Some(dialog), ID_ADDRESS.into()) }.unwrap();
+            let mut rect = RECT::default();
+            let mut window = RECT::default();
+            unsafe {
+                let _ = GetWindowRect(address, &mut rect);
+                let _ = GetWindowRect(dialog, &mut window);
+            }
+            rect.bottom - window.top
+        };
+        paint_on_window_cropped(dialog, note_top);
+        press(dialog, ID_OK);
+        assert!(still_there(dialog), "paired with the note cut off");
+        // Cut through the middle of the note it is not seen either.
+        paint_on_window_cropped(dialog, note_top + 20);
+        press(dialog, ID_OK);
+        assert!(still_there(dialog), "paired with half of the note");
+        // Once the whole note is on the window, the next press counts.
         paint_on_window(dialog);
-        click(dialog, ID_OK);
-        wait_closed(dialog);
+        press(dialog, ID_OK);
     });
     let shown = run(HWND::default(), None);
     driver.join().unwrap();
-    let entry = shown.unwrap().expect("the press after the paint pairs");
+    let entry = shown
+        .unwrap()
+        .expect("the press after the whole note pairs");
     assert_eq!(entry.address, "center:7878");
 }
 
@@ -756,17 +810,13 @@ fn a_note_that_was_seen_is_forgotten_when_the_address_changes() {
         // Another address, and back: the note of the first is not seen again.
         set_text(dialog, ID_ADDRESS, "nas:7878");
         set_text(dialog, ID_ADDRESS, "center:7878");
-        click(dialog, ID_OK);
-        unsafe {
-            SendMessageW(dialog, 0x0000, None, None);
-        }
+        press(dialog, ID_OK);
         assert!(
             unsafe { IsWindow(Some(dialog)) }.as_bool(),
             "paired with a note that was not seen again"
         );
         paint_on_window(dialog);
-        click(dialog, ID_OK);
-        wait_closed(dialog);
+        press(dialog, ID_OK);
     });
     let shown = run(HWND::default(), None);
     driver.join().unwrap();
@@ -779,8 +829,7 @@ fn a_path_that_is_encrypted_needs_no_note() {
     let driver = drive(|dialog| {
         set_text(dialog, ID_CODE, "abcdef");
         set_text(dialog, ID_ADDRESS, "100.71.140.68:7878");
-        click(dialog, ID_OK);
-        wait_closed(dialog);
+        press(dialog, ID_OK);
     });
     let shown = run(HWND::default(), None);
     driver.join().unwrap();
@@ -818,6 +867,40 @@ fn a_handle_that_is_not_a_device_context_is_not_drawn_on() {
     unsafe {
         let _ = windows::Win32::Graphics::Gdi::DeleteObject(
             windows::Win32::Graphics::Gdi::HGDIOBJ(brush.0),
+        );
+    }
+}
+
+#[test]
+fn the_scene_picture_has_the_buttons_in_their_states() {
+    use crate::scene::pair::{Focus, Model, frame};
+    use crate::win::surface::Surface;
+    for (enabled, role) in [(true, Role::PrimaryBg), (false, Role::Track)] {
+        let ui = Ui::new(Mode::Light, 96).unwrap();
+        let mut surface = Surface::new(420, 400).unwrap();
+        ui.draw_dialog_with_buttons(surface.hdc, (420, 400), "", enabled)
+            .unwrap();
+        let model = Model {
+            address: String::new(),
+            focus: Focus::None,
+        };
+        let frame = frame(&model, ui.typography());
+        // A point of the main button that has no label on it.
+        let (x, y) = (
+            (frame.primary.x + 8.0) as usize,
+            (frame.primary.y + frame.primary.h / 2.0) as usize,
+        );
+        let pixels = surface.pixels_mut();
+        let at = (y * 420 + x) * 4;
+        let want = colorref(Mode::Light, role);
+        assert_eq!(
+            (pixels[at + 2], pixels[at + 1], pixels[at]),
+            (
+                (want.0 & 0xFF) as u8,
+                ((want.0 >> 8) & 0xFF) as u8,
+                ((want.0 >> 16) & 0xFF) as u8
+            ),
+            "main button, enabled: {enabled}"
         );
     }
 }

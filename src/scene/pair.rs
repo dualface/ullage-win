@@ -142,12 +142,16 @@ pub struct Frame {
     /// The areas of the buttons, with the margin for their focus rings.
     pub cancel: Rect,
     pub primary: Rect,
+    /// The plain text note, when there is one: it has to be wholly on the
+    /// screen before an address that is not encrypted can be paired with.
+    pub note: Option<Rect>,
     pub shapes: Vec<Shape>,
 }
 
 /// The layout and the shapes for `model`.
 pub fn frame(model: &Model, measure: &dyn Measure) -> Frame {
     let status = status(&model.address);
+    let mut note = None;
     let inner = WIDTH - 2.0 * PAD;
     let mut shapes = Vec::new();
     let mut y = PAD;
@@ -207,6 +211,7 @@ pub fn frame(model: &Model, measure: &dyn Measure) -> Frame {
             let note_font = font(FontKind::Ui, 12.0, 400);
             let lines = wrap(PLAINTEXT_NOTE, inner - 2.0 * NOTE_PAD_X, note_font, measure);
             let height = 2.0 * NOTE_PAD_Y + NOTE_LINE * lines.len() as f32;
+            note = Some(Rect::new(PAD, y, inner, height));
             shapes.push(Shape::Rect {
                 rect: Rect::new(PAD, y, inner, height),
                 radius: BOX_RADIUS,
@@ -293,6 +298,7 @@ pub fn frame(model: &Model, measure: &dyn Measure) -> Frame {
         code_edit,
         cancel,
         primary,
+        note,
         shapes,
     }
 }
@@ -578,6 +584,29 @@ mod tests {
         assert!(plain > invalid, "the plain text note takes the most room");
         // Taking the status away gives the room back.
         assert_eq!(frame_of("100.71.140.68:1", Focus::None).size.1, none);
+    }
+
+    #[test]
+    fn the_note_has_a_rect_only_for_a_path_that_is_not_encrypted_and_it_is_drawn_there() {
+        for address in ["", "100.71.140.68:7878", "8.8.8.8:80"] {
+            assert_eq!(frame_of(address, Focus::None).note, None, "{address}");
+        }
+        let frame = frame_of("center:7878", Focus::None);
+        let note = frame.note.expect("a note");
+        assert!(note.bottom() <= frame.size.1 && note.right() <= frame.size.0);
+        // The yellow plate is the note, and its text is inside it.
+        assert!(frame.shapes.iter().any(|shape| matches!(
+            shape,
+            Shape::Rect { rect, fill: Some(Role::WarnBg), .. } if *rect == note
+        )));
+        for text in texts(&frame.shapes) {
+            if text.color == Role::WarnText {
+                assert!(text.rect.y >= note.y && text.rect.bottom() <= note.bottom());
+            }
+        }
+        // Under the address box, above the code.
+        assert!(note.y >= frame.address_box.bottom());
+        assert!(note.bottom() <= frame.code_label.y);
     }
 
     #[test]

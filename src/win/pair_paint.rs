@@ -6,22 +6,25 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use windows::Win32::Foundation::COLORREF;
+use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory, ID2D1Factory,
 };
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET,
-    DeleteObject, GetObjectType, HBRUSH, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, SRCCOPY,
+    DeleteObject, GetClipBox, GetObjectType, HBRUSH, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS,
+    SRCCOPY,
 };
 use windows::core::{Interface, Result};
 
 use super::gfx::{Painter, make_target};
 use super::surface::Surface;
 use super::text::Typography;
+#[cfg(test)]
+use crate::scene::pair::primary_label;
 use crate::scene::pair::{
     ButtonState, CODE_FONT, EDIT_FONT, Focus, Kind, LABEL_FONT, Model, Status, button_shapes,
-    frame, status,
+    frame, status, to_pixels,
 };
 use crate::scene::{Font, Rect, Shape};
 use crate::theme::{Color, Mode, Role};
@@ -38,6 +41,14 @@ pub fn colorref(mode: Mode, role: Role) -> COLORREF {
 pub fn is_dc(hdc: HDC) -> bool {
     // `OBJ_DC` and `OBJ_MEMDC`.
     matches!(unsafe { GetObjectType(HGDIOBJ(hdc.0)) }, 3 | 10)
+}
+
+/// The bounding box of what can be drawn on `hdc` (its clip region), in
+/// pixels, or `None` when nothing can.
+fn clip_box(hdc: HDC) -> Option<RECT> {
+    let mut rect = RECT::default();
+    // `NULLREGION` is 1 and `ERROR` is 0.
+    (unsafe { GetClipBox(hdc, &mut rect) }.0 > 1).then_some(rect)
 }
 
 /// A font of `font`'s size in DIPs, for a window at `dpi`.
@@ -187,13 +198,25 @@ impl Ui {
     /// Draws `shapes` (in DIPs) on `hdc`, which is `size` pixels, through a
     /// bitmap in memory, so that nothing flickers.
     pub fn draw(&self, hdc: HDC, size: (i32, i32), shapes: &[Shape]) -> Result<()> {
+        self.draw_layers(hdc, size, &[(shapes, (0.0, 0.0))])
+    }
+
+    /// Draws each layer of shapes at its own origin (in DIPs).
+    pub fn draw_layers(
+        &self,
+        hdc: HDC,
+        size: (i32, i32),
+        layers: &[(&[Shape], (f32, f32))],
+    ) -> Result<()> {
         let surface = Surface::new(size.0, size.1)?;
         unsafe {
             let target = make_target(&self.factory, &surface, self.dpi.get())?;
             let mut painter = Painter::new(&self.factory, target.cast()?, self.typography.clone())?;
             painter.set_mode(self.mode.get());
             painter.begin();
-            painter.draw_shapes(shapes, (0.0, 0.0));
+            for (shapes, origin) in layers {
+                painter.draw_shapes(shapes, *origin);
+            }
             painter.end()?;
             BitBlt(hdc, 0, 0, size.0, size.1, Some(surface.hdc), 0, 0, SRCCOPY)?;
         }
@@ -227,12 +250,75 @@ impl Ui {
             border: None,
         }];
         shapes.extend(frame.shapes);
+        // What the device context shows is what its clip box says: a window
+        // that is partly off the screen, or partly covered, gets a smaller one.
+        let clip = clip_box(hdc);
         self.draw(hdc, size, &shapes)?;
-        // The note is on the screen now: that address may be paired with.
-        if on_screen && status(address) == Status::Plaintext {
+        // The note is on the screen now, wholly: that address may be paired
+        // with. A copy that went through but left the note out is not enough.
+        if on_screen
+            && status(address) == Status::Plaintext
+            && frame.note.is_some_and(|note| {
+                let (x, y, w, h) = to_pixels(note, self.dpi.get());
+                clip.is_some_and(|clip| {
+                    clip.left <= x && clip.top <= y && clip.right >= x + w && clip.bottom >= y + h
+                })
+            })
+        {
             *self.noted.borrow_mut() = Some(address.to_owned());
         }
         Ok(())
+    }
+
+    /// The dialog as `draw_dialog` draws it, with its two buttons too, the
+    /// main one in the state that `primary_enabled` says. For a picture that
+    /// is made without the controls of the window.
+    #[cfg(test)]
+    pub fn draw_dialog_with_buttons(
+        &self,
+        hdc: HDC,
+        size: (i32, i32),
+        address: &str,
+        primary_enabled: bool,
+    ) -> Result<()> {
+        let model = Model {
+            address: address.to_owned(),
+            focus: self.focus.get(),
+        };
+        let frame = frame(&model, &*self.typography);
+        let scale = self.dpi.get() as f32 / 96.0;
+        let mut dialog = vec![Shape::Rect {
+            rect: Rect::new(0.0, 0.0, size.0 as f32 / scale, size.1 as f32 / scale),
+            radius: 0.0,
+            fill: Some(Role::Win),
+            border: None,
+        }];
+        dialog.extend(frame.shapes.iter().cloned());
+        let label = primary_label(&status(address));
+        let primary = button_shapes(
+            Kind::Primary,
+            ButtonState {
+                disabled: !primary_enabled,
+                ..Default::default()
+            },
+            label,
+            Rect::new(0.0, 0.0, frame.primary.w, frame.primary.h),
+        );
+        let cancel = button_shapes(
+            Kind::Secondary,
+            ButtonState::default(),
+            "Cancel",
+            Rect::new(0.0, 0.0, frame.cancel.w, frame.cancel.h),
+        );
+        self.draw_layers(
+            hdc,
+            size,
+            &[
+                (&dialog, (0.0, 0.0)),
+                (&primary, (frame.primary.x, frame.primary.y)),
+                (&cancel, (frame.cancel.x, frame.cancel.y)),
+            ],
+        )
     }
 
     /// A button of `kind`, `size` pixels, on `hdc`.
