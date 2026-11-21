@@ -1,10 +1,11 @@
-//! The compact strip: one line for each account.
+//! The compact strip: one line for each account, with its label, the row
+//! with the least left, that row's reading and reset, and a bar.
 
 use ullage_cli::usage_view::{UsageCard, UsageRow};
 
 use super::cards::{ContentPad, reading_width};
 use super::{Align, Content, FontKind, Measure, Rect, Shape, font, text, text_box_width};
-use crate::compact::lowest_row;
+use crate::compact::{labels, lowest_row, reset_text};
 use crate::display::{BAR_CELLS, Bar, ReadingText, bar, reading_text};
 use crate::theme::Role;
 
@@ -31,8 +32,11 @@ const OFF_MARKER: &str = " off";
 
 /// What one line shows; an account with no row reads `no data`.
 struct Line<'a> {
-    card: &'a UsageCard,
+    /// The provider, numbered when it has more than one account.
+    label: String,
     row: Option<&'a UsageRow>,
+    /// How long until the row resets, when the row says.
+    reset: Option<String>,
 }
 
 pub(super) fn build(
@@ -44,11 +48,17 @@ pub(super) fn build(
 ) {
     let value_font = font(FontKind::Mono, 12.0 * scale, 600);
     let prefix_font = font(FontKind::Mono, 11.0 * scale, 400);
+    let reset_font = font(FontKind::Mono, 11.0 * scale, 400);
     let lines: Vec<Line> = cards
         .iter()
-        .map(|card| Line {
-            card,
-            row: lowest_row(card),
+        .zip(labels(cards))
+        .map(|(card, label)| {
+            let row = lowest_row(card);
+            Line {
+                label,
+                row,
+                reset: row.and_then(|row| row.resets_in).map(reset_text),
+            }
         })
         .collect();
     let readings: Vec<ReadingText> = lines
@@ -66,13 +76,19 @@ pub(super) fn build(
         .iter()
         .map(|reading| reading_width(reading, value_font, prefix_font, measure))
         .fold(MIN_READING_WIDTH, f32::max);
+    // The reset column is as wide as its longest text, and takes no room
+    // when no line has a reset.
+    let reset_col = lines
+        .iter()
+        .filter_map(|line| line.reset.as_deref())
+        .map(|reset| text_box_width(measure, reset, reset_font))
+        .fold(0.0, f32::max);
 
     let row_height = ROW_HEIGHT * scale;
     let left = PAD_SIDE + ROW_PAD;
     let right = inner_width - PAD_SIDE - ROW_PAD;
     let name_font = font(FontKind::Mono, 11.0 * scale, 400);
     let label_font = font(FontKind::Mono, 12.0 * scale, 700);
-    let account_font = font(FontKind::Mono, 12.0 * scale, 400);
 
     for (index, (line, reading)) in lines.iter().zip(&readings).enumerate() {
         let y = index as f32 * row_height;
@@ -83,9 +99,14 @@ pub(super) fn build(
             border: None,
         });
 
-        // Columns from the right: bar, reading, name, then the label.
+        // Columns from the right: bar, reset, reading, name, then the label.
         let bar_x = right - BAR_WIDTH;
-        let reading_right = bar_x - COLUMN_GAP;
+        let reset_right = bar_x - COLUMN_GAP;
+        let reading_right = if reset_col > 0.0 {
+            reset_right - reset_col - COLUMN_GAP
+        } else {
+            reset_right
+        };
         let name = line.row.map(|row| row.name.as_str()).unwrap_or("");
         let off = line.row.is_some_and(|row| row.off);
         // The `off` marker follows the name, in the same faint colour as the
@@ -157,6 +178,18 @@ pub(super) fn build(
             ));
         }
 
+        if let Some(reset) = &line.reset {
+            let reset_w = text_box_width(measure, reset, reset_font);
+            body.shapes.push(text(
+                Rect::new(reset_right - reset_w, y, reset_w, row_height),
+                reset.clone(),
+                reset_font,
+                Role::Sub,
+                Align::Right,
+                false,
+            ));
+        }
+
         if let Some(Bar { filled, color }) = line.row.and_then(bar) {
             let top = y + (row_height - CELL.1) / 2.0;
             for cell in 0..BAR_CELLS {
@@ -175,33 +208,17 @@ pub(super) fn build(
             }
         }
 
-        // `provider account`, cut back with an ellipsis when it is too long.
+        // The label, cut back with an ellipsis when it is too long.
         let avail = (label_right - left).max(0.0);
-        let provider = &line.card.title.provider;
-        let provider_w = text_box_width(measure, provider, label_font).min(avail);
+        let label_w = text_box_width(measure, &line.label, label_font).min(avail);
         body.shapes.push(text(
-            Rect::new(left, y, provider_w, row_height),
-            provider.clone(),
+            Rect::new(left, y, label_w, row_height),
+            line.label.clone(),
             label_font,
             Role::Accent,
             Align::Left,
             true,
         ));
-        let space = measure.width(" ", account_font);
-        let account_x = left + provider_w + space;
-        let account_avail = (label_right - account_x).max(0.0);
-        if account_avail > 0.0 {
-            let account = &line.card.title.account;
-            let account_w = text_box_width(measure, account, account_font).min(account_avail);
-            body.shapes.push(text(
-                Rect::new(account_x, y, account_w, row_height),
-                account.clone(),
-                account_font,
-                Role::Faint,
-                Align::Left,
-                true,
-            ));
-        }
     }
     body.height = lines.len() as f32 * row_height + PAD_BOTTOM;
 }
@@ -271,7 +288,6 @@ mod tests {
         );
         let provider = text_of(&scene.content, "cursor");
         assert_eq!((provider.font.weight, provider.color), (700, Role::Accent));
-        text_of(&scene.content, "account-5");
         assert!(!texts(&scene.content).iter().any(|t| t.text == "auto"));
     }
 
@@ -403,22 +419,99 @@ mod tests {
     #[test]
     fn a_long_label_is_cut_back_before_it_touches_the_name() {
         let cards = vec![card(
-            "opencode",
+            "a-provider-with-a-very-long-name",
             None,
-            "account-with-a-very-long-name",
+            "account-5",
             vec![row(
                 "monthly",
                 Reading::Remaining("99%".into()),
                 Some(0.99),
-                None,
+                Some(86_400),
             )],
         )];
         let scene = build(&input(&cards), &FakeMeasure);
-        let provider = text_of(&scene.content, "opencode");
-        let account = text_of(&scene.content, "account-with-a-very-long-name");
+        let label = text_of(&scene.content, "a-provider-with-a-very-long-name");
         let name = text_of(&scene.content, "monthly");
-        assert!(account.ellipsis);
-        assert!(account.rect.right() <= name.rect.x);
-        assert!(provider.rect.right() <= account.rect.x);
+        assert!(label.ellipsis);
+        assert!(label.rect.right() <= name.rect.x);
+    }
+
+    #[test]
+    fn the_label_is_the_provider_numbered_only_when_it_has_several_accounts() {
+        let mut cards = sample_cards(2);
+        cards.push(card(
+            "codex",
+            None,
+            "account-9",
+            vec![row("5h", Reading::Remaining("50%".into()), Some(0.5), None)],
+        ));
+        let scene = build(&input(&cards), &FakeMeasure);
+        let label = text_of(&scene.content, "claude-1");
+        assert_eq!((label.font.weight, label.color), (700, Role::Accent));
+        text_of(&scene.content, "claude-2");
+        text_of(&scene.content, "codex");
+        let shown: Vec<&str> = texts(&scene.content)
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect();
+        for account in ["account-0", "account-1", "account-9"] {
+            assert!(!shown.contains(&account), "{account} is drawn");
+        }
+    }
+
+    #[test]
+    fn the_reset_sits_between_the_reading_and_the_bar() {
+        // The weekly row, 4 days off, has the least left.
+        let cards = sample_cards(1);
+        let scene = build(&input(&cards), &FakeMeasure);
+        let reset = text_of(&scene.content, "4d");
+        assert_eq!(
+            (reset.font.size, reset.font.weight, reset.color, reset.align),
+            (11.0, 400, Role::Sub, Align::Right)
+        );
+        let reading = text_of(&scene.content, "73%");
+        // 290 wide, less the 1 DIP frame, 4 of padding and 8 inside the row:
+        // the bar starts 49 DIPs further left, the reset 8 before it.
+        let bar_x = 290.0 - 2.0 - 4.0 - 8.0 - 49.0;
+        assert_eq!(reset.rect.right(), bar_x - 8.0);
+        assert!(reading.rect.right() + 8.0 <= reset.rect.x);
+    }
+
+    #[test]
+    fn resets_share_a_right_edge_and_a_line_without_one_shows_none() {
+        let mut cards = sample_cards(2);
+        cards[1].rows[1].resets_in = Some(5 * 3600 + 3 * 60);
+        cards.push(card(
+            "codex",
+            None,
+            "account-9",
+            vec![row("5h", Reading::Remaining("50%".into()), Some(0.5), None)],
+        ));
+        cards.push(card("grok", None, "account-4", Vec::new()));
+        let scene = build(&input(&cards), &FakeMeasure);
+        let days = text_of(&scene.content, "4d");
+        let hours = text_of(&scene.content, "5h03m");
+        assert_eq!(days.rect.right(), hours.rect.right());
+        let resets = texts(&scene.content)
+            .iter()
+            .filter(|t| t.color == Role::Sub)
+            .count();
+        assert_eq!(resets, 2, "the codex and grok lines have no reset");
+        // The reading column moves left by the widest reset.
+        let reading = text_of(&scene.content, "50%");
+        assert_eq!(reading.rect.right(), hours.rect.x - 8.0);
+    }
+
+    #[test]
+    fn without_any_reset_the_reading_sits_next_to_the_bar() {
+        let cards = vec![card(
+            "codex",
+            None,
+            "account-9",
+            vec![row("5h", Reading::Remaining("50%".into()), Some(0.5), None)],
+        )];
+        let scene = build(&input(&cards), &FakeMeasure);
+        let reading = text_of(&scene.content, "50%");
+        assert_eq!(reading.rect.right(), 290.0 - 2.0 - 4.0 - 8.0 - 49.0 - 8.0);
     }
 }
