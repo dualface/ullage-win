@@ -178,6 +178,8 @@ fn a_dialog_formats_the_code_and_takes_only_a_whole_one() {
         assert!(!enabled(dialog, ID_OK));
         set_text(dialog, ID_ADDRESS, "Center:7878");
         assert!(enabled(dialog, ID_OK));
+        // The note of a path that is not encrypted is drawn first.
+        draw_once(dialog);
         click(dialog, ID_OK);
     });
     let shown = run(HWND::default(), Some("center:7878"));
@@ -255,6 +257,26 @@ fn focus(dialog: HWND, id: u16) {
             WM_NEXTDLGCTL,
             Some(WPARAM(control.0 as usize)),
             Some(LPARAM(1)),
+        );
+    }
+}
+
+/// Has the dialog draw itself once, as it is when the screen shows it: a
+/// session without a screen gets no `WM_PAINT`, so the window is asked to
+/// print itself, which draws the same things.
+fn draw_once(dialog: HWND) {
+    const WM_PRINT: u32 = 0x0317;
+    let mut rect = RECT::default();
+    unsafe {
+        let _ = GetClientRect(dialog, &mut rect);
+    }
+    let surface = crate::win::surface::Surface::new(rect.right.max(1), rect.bottom.max(1)).unwrap();
+    unsafe {
+        SendMessageW(
+            dialog,
+            WM_PRINT,
+            Some(WPARAM(surface.hdc.0 as usize)),
+            Some(LPARAM(0x4 | 0x8)),
         );
     }
 }
@@ -677,8 +699,8 @@ fn a_path_that_is_not_encrypted_is_paired_with_only_after_its_note_was_drawn() {
             unsafe { IsWindow(Some(dialog)) }.as_bool(),
             "paired too early"
         );
-        // Once it is drawn, the next press counts.
-        thread::sleep(Duration::from_millis(400));
+        // Once the note is drawn, the next press counts.
+        draw_once(dialog);
         click(dialog, ID_OK);
         wait_closed(dialog);
     });
