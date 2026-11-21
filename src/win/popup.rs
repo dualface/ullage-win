@@ -18,9 +18,18 @@ use crate::menu::{Command, Item, MenuState, items};
 pub struct Anchor {
     pub x: i32,
     pub y: i32,
-    /// The menu hangs under `y` and ends at `x`, as under a button; without
-    /// it the menu rises from `y`, as from the notification area.
-    pub below_button: bool,
+    pub opens: Opens,
+}
+
+/// Which way the menu opens from its anchor point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opens {
+    /// Hangs under the point and ends at it, as under a button.
+    BelowButton,
+    /// Rises from the point, as from the notification area.
+    AboveTray,
+    /// Starts at the point and goes right and down, as a context menu.
+    AtCursor,
 }
 
 /// Asks the menus of this app to follow the system's dark setting. Windows
@@ -133,10 +142,10 @@ pub fn show(hwnd: HWND, state: &MenuState, anchor: Anchor) -> Option<Command> {
         // Without this a menu opened from the notification area does not
         // close when the user clicks elsewhere.
         let _ = SetForegroundWindow(hwnd);
-        let align = if anchor.below_button {
-            TPM_RIGHTALIGN | TPM_TOPALIGN
-        } else {
-            TPM_LEFTALIGN | TPM_BOTTOMALIGN
+        let align = match anchor.opens {
+            Opens::BelowButton => TPM_RIGHTALIGN | TPM_TOPALIGN,
+            Opens::AboveTray => TPM_LEFTALIGN | TPM_BOTTOMALIGN,
+            Opens::AtCursor => TPM_LEFTALIGN | TPM_TOPALIGN,
         };
         let chosen = TrackPopupMenuEx(
             menu,

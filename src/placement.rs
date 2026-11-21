@@ -91,9 +91,37 @@ pub fn keep_inside(work: Edges, (x, y): (i32, i32), size: (i32, i32)) -> (i32, i
     )
 }
 
+/// The gap between the top left corner of the window and a context menu the
+/// keyboard opened.
+const KEYBOARD_MENU_INSET_DIP: i32 = 8;
+
+/// Where the context menu of the window opens. `WM_CONTEXTMENU` gives the
+/// cursor, or -1, -1 when the keyboard (Shift+F10, the menu key) asked for
+/// the menu. The cursor can be at -1, -1 on a monitor left of and above the
+/// main one; Windows gives the two cases the same value, so such a click
+/// opens the menu at the window too. `window` is the top left corner of the
+/// window.
+pub fn context_menu_origin(point: (i32, i32), window: (i32, i32), dpi: u32) -> (i32, i32) {
+    if point == (-1, -1) {
+        let inset = scaled(KEYBOARD_MENU_INSET_DIP, dpi);
+        (window.0 + inset, window.1 + inset)
+    } else {
+        point
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_context_menu_opens_at_the_cursor_or_inside_the_window_for_the_keyboard() {
+        let window = (1500, 40);
+        assert_eq!(context_menu_origin((1600, 90), window, 96), (1600, 90));
+        assert_eq!(context_menu_origin((-5, -1), window, 96), (-5, -1));
+        assert_eq!(context_menu_origin((-1, -1), window, 96), (1508, 48));
+        assert_eq!(context_menu_origin((-1, -1), window, 144), (1512, 52));
+    }
 
     const PRIMARY: Edges = Edges {
         left: 0,

@@ -98,14 +98,15 @@ window of the first copy.
 | --- | --- |
 | Left click on the tray icon, or `Win+Alt+U` | Show or hide the window |
 | Right click on the tray icon, or the `...` button | Open the menu |
+| Right click anywhere on the window | Open the same menu where you clicked (the compact strip has no `...` button) |
 | Drag the title bar or any blank space | Move the window |
 | Mouse wheel | Scroll, when the cards are taller than the screen |
 
 The menu has: show or hide, compact strip, always on top, click-through, layout,
 text size, opacity, connection (which daemon to ask, and how to pair with a
 remote one), refresh now, start at sign-in, and quit. While
-click-through is on, mouse clicks pass through the window, so turn it off from
-the tray menu.
+click-through is on, mouse clicks pass through the window, right clicks too,
+so turn it off from the tray menu.
 
 ## Settings
 

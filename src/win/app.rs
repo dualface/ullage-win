@@ -33,7 +33,7 @@ use super::dialog::Dialog;
 use super::fetch::{Delivery, Fetcher, Source};
 use super::gfx::Renderer;
 use super::pair::{PairResult, Pairer};
-use super::popup::Anchor;
+use super::popup::{Anchor, Opens};
 use super::registry;
 use super::text::Typography;
 use super::tray;
@@ -41,7 +41,9 @@ use super::util::{pcwstr, wide};
 use crate::contract::GUIDE_URL;
 use crate::menu::{Command, MenuState};
 use crate::pair_form::OnePlace;
-use crate::placement::{Edges, keep_inside, restore_position, to_px, window_size_px};
+use crate::placement::{
+    Edges, context_menu_origin, keep_inside, restore_position, to_px, window_size_px,
+};
 use crate::prefs::{Connection, Prefs, save};
 use crate::remote::address::RemoteAddress;
 use crate::remote::pairing::{self, ApplyError, ForgetError, PairCode, PairingEpoch};
@@ -580,7 +582,7 @@ impl App {
                     return Reply::Menu(Anchor {
                         x: window.left + to_px(rect.right(), self.dpi),
                         y: window.top + to_px(rect.bottom(), self.dpi),
-                        below_button: true,
+                        opens: Opens::BelowButton,
                     });
                 }
             }
@@ -631,7 +633,19 @@ impl App {
         Anchor {
             x: point.x,
             y: point.y,
-            below_button: false,
+            opens: Opens::AboveTray,
+        }
+    }
+
+    /// The menu of a right click on the window, or of Shift+F10 or the menu
+    /// key: `point` is what `WM_CONTEXTMENU` carries.
+    pub fn context_menu_anchor(&self, point: (i32, i32)) -> Anchor {
+        let window = self.window_rect();
+        let (x, y) = context_menu_origin(point, (window.left, window.top), self.dpi);
+        Anchor {
+            x,
+            y,
+            opens: Opens::AtCursor,
         }
     }
 

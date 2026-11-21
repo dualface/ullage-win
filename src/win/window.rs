@@ -195,6 +195,10 @@ fn dispatch(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Reply {
             WM_RBUTTONUP | WM_CONTEXTMENU => Reply::Menu(app.tray_menu_anchor()),
             _ => Reply::Done(0),
         },
+        // A right click anywhere on the window, the title bar and the drag
+        // areas included, and Shift+F10 or the menu key. Not passing it on
+        // keeps the system menu away from the title bar.
+        WM_CONTEXTMENU => Reply::Menu(app.context_menu_anchor((x_of(lparam.0), y_of(lparam.0)))),
         WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => {
             app.toggle_visible();
             Reply::Done(0)
