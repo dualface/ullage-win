@@ -21,12 +21,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA, GetMessageW,
-    GetWindowLongPtrW, HTCAPTION, HTCLIENT, IDC_ARROW, LoadCursorW, MSG, RegisterClassExW,
-    RegisterWindowMessageW, SW_SHOW, SetTimer, SetWindowLongPtrW, ShowWindow, TranslateMessage,
-    WM_CLOSE, WM_CONTEXTMENU, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND,
-    WM_EXITSIZEMOVE, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCHITTEST, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    GetWindowLongPtrW, HTCAPTION, HTCLIENT, IDC_ARROW, KillTimer, LoadCursorW, MSG,
+    RegisterClassExW, RegisterWindowMessageW, SPI_SETWORKAREA, SW_SHOW, SetTimer,
+    SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE, WM_CONTEXTMENU, WM_DISPLAYCHANGE,
+    WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_HOTKEY, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_QUERYENDSESSION,
+    WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::BOOL;
 use windows::core::{PCWSTR, w};
@@ -52,6 +53,11 @@ use crate::scene::Spot;
 pub const HOTKEY_ID: i32 = 1;
 const TIMER_ID: usize = 1;
 const TICK_MS: u32 = 1000;
+/// Fires once after a display change. The system may send
+/// `WM_DISPLAYCHANGE` before it has updated the monitor layout and the work
+/// area, so the place of the window is checked again.
+const DISPLAY_RECHECK_TIMER_ID: usize = 2;
+const DISPLAY_RECHECK_MS: u32 = 500;
 /// `WM_MOUSELEAVE`, sent after `TrackMouseEvent` with `TME_LEAVE`.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 /// The `V` of the shortcut `Win+Alt+U` is `U`.
@@ -166,6 +172,14 @@ fn dispatch(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Reply {
             app.tick();
             Reply::Done(0)
         }
+        WM_TIMER if wparam.0 == DISPLAY_RECHECK_TIMER_ID => {
+            unsafe {
+                let _ = KillTimer(Some(app.hwnd), DISPLAY_RECHECK_TIMER_ID);
+            }
+            app.rebuild_scene();
+            app.ensure_on_screen();
+            Reply::Done(0)
+        }
         WM_FETCH_DONE => {
             app.take_results();
             Reply::Done(0)
@@ -222,10 +236,26 @@ fn dispatch(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Reply {
         }
         WM_DISPLAYCHANGE => {
             app.rebuild_scene();
+            app.ensure_on_screen();
+            // The same id replaces a timer that is still running, so a burst
+            // of messages leaves one recheck.
+            unsafe {
+                SetTimer(
+                    Some(app.hwnd),
+                    DISPLAY_RECHECK_TIMER_ID,
+                    DISPLAY_RECHECK_MS,
+                    None,
+                );
+            }
             Reply::Done(0)
         }
         WM_SETTINGCHANGE => {
             app.refresh_theme();
+            // A moved or hidden taskbar changes the work area.
+            if wparam.0 as u32 == SPI_SETWORKAREA.0 {
+                app.rebuild_scene();
+                app.ensure_on_screen();
+            }
             Reply::Default
         }
         WM_EXITSIZEMOVE => {

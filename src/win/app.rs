@@ -239,6 +239,31 @@ impl App {
         self.redraw();
     }
 
+    /// Moves the window just far enough to lie inside the work area of the
+    /// nearest monitor, and leaves it where it is when it already does. Used
+    /// only when the monitors or the work area change, and before the window
+    /// is shown: calling it on every tick would pull a window back while the
+    /// user drags it, or off a place across two monitors.
+    pub fn ensure_on_screen(&mut self) {
+        let rect = self.window_rect();
+        let size = (rect.right - rect.left, rect.bottom - rect.top);
+        let (x, y) = keep_inside(self.work_area(), (rect.left, rect.top), size);
+        if (x, y) == (rect.left, rect.top) {
+            return;
+        }
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
     /// Gives the window the size of the scene, moving it only as far as
     /// needed to keep it on the screen.
     fn fit_window(&mut self) {
@@ -853,6 +878,9 @@ impl App {
     }
 
     pub fn show(&mut self) {
+        // The monitors may have changed while the window was hidden; move it
+        // before it shows, so it does not flash off the screen.
+        self.ensure_on_screen();
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
             let _ = SetForegroundWindow(self.hwnd);
