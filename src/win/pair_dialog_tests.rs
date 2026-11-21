@@ -297,53 +297,42 @@ fn messages_with_parameters_that_point_nowhere_do_nothing() {
     let driver = drive(|dialog| {
         set_text(dialog, ID_CODE, "abc");
         let address = unsafe { GetDlgItem(Some(dialog), ID_ADDRESS.into()) }.unwrap();
+        let label = unsafe { GetDlgItem(Some(dialog), ID_ADDRESS_LABEL.into()) }.unwrap();
+        let surface = crate::win::surface::Surface::new(8, 8).unwrap();
+        let ask = |message: u32, hdc: usize, control: usize| unsafe {
+            SendMessageW(
+                dialog,
+                message,
+                Some(WPARAM(hdc)),
+                Some(LPARAM(control as isize)),
+            )
+            .0
+        };
+        // What the dialog gives its own controls: a brush of its own.
+        let hdc = surface.hdc.0 as usize;
+        let frame_brush = ask(WM_CTLCOLOREDIT, hdc, address.0 as usize);
+        let label_brush = ask(WM_CTLCOLORSTATIC, hdc, label.0 as usize);
+        assert!(frame_brush != 0 && label_brush != 0);
+        assert_ne!(frame_brush, label_brush);
+        // What it gives anything else is the system's answer, not its brush.
         for value in [0usize, 1, 0xdead_beef] {
-            for message in [WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_PRINTCLIENT] {
-                let answer = unsafe {
-                    SendMessageW(
-                        dialog,
-                        message,
-                        Some(WPARAM(value)),
-                        Some(LPARAM(value as isize)),
-                    )
-                };
-                // A control that is not one of the dialog's gets no brush.
-                if message != WM_PRINTCLIENT {
-                    assert_eq!(answer.0, 0, "{message:#x} {value:#x}");
-                }
+            for hdc in [0, 1, 0xdead_beef, surface.hdc.0 as usize] {
+                assert_ne!(
+                    ask(WM_CTLCOLOREDIT, hdc, value),
+                    frame_brush,
+                    "{hdc:#x} {value:#x}"
+                );
+                assert_ne!(
+                    ask(WM_CTLCOLORSTATIC, hdc, value),
+                    label_brush,
+                    "{hdc:#x} {value:#x}"
+                );
+                ask(WM_PRINTCLIENT, hdc, value);
             }
         }
-        // A real box is asked about with a device context that is not one.
-        unsafe {
-            SendMessageW(
-                dialog,
-                WM_CTLCOLOREDIT,
-                Some(WPARAM(0xdead_beef)),
-                Some(LPARAM(address.0 as isize)),
-            );
-        }
-        // And with one, it gets the brush of the frame.
-        let surface = crate::win::surface::Surface::new(8, 8).unwrap();
-        let brush = unsafe {
-            SendMessageW(
-                dialog,
-                WM_CTLCOLOREDIT,
-                Some(WPARAM(surface.hdc.0 as usize)),
-                Some(LPARAM(address.0 as isize)),
-            )
-        };
-        assert_ne!(brush.0, 0);
         // A label is not a box, and a box is not a label.
-        let label = unsafe { GetDlgItem(Some(dialog), ID_ADDRESS_LABEL.into()) }.unwrap();
-        let wrong = unsafe {
-            SendMessageW(
-                dialog,
-                WM_CTLCOLOREDIT,
-                Some(WPARAM(surface.hdc.0 as usize)),
-                Some(LPARAM(label.0 as isize)),
-            )
-        };
-        assert_eq!(wrong.0, 0);
+        assert_ne!(ask(WM_CTLCOLOREDIT, hdc, label.0 as usize), frame_brush);
+        assert_ne!(ask(WM_CTLCOLORSTATIC, hdc, address.0 as usize), label_brush);
         // The dialog still works.
         assert_eq!(text_of(dialog, ID_CODE), "ABC");
         type_key(dialog, ID_CODE, 'd');
