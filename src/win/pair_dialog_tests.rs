@@ -316,6 +316,56 @@ fn paint_on_window_cropped(dialog: HWND, rows: i32) {
     }
 }
 
+/// Like `paint_on_window`, with a clip region that has a hole in the middle
+/// of the note: the box round what shows holds the whole note, and what shows
+/// does not, as when another window lies across the middle of the dialog.
+fn paint_on_window_with_a_hole(dialog: HWND) {
+    use windows::Win32::Graphics::Gdi::{
+        CombineRgn, CreateRectRgn, DeleteObject, HGDIOBJ, RGN_COMBINE_MODE, ScreenToClient,
+        SelectClipRgn,
+    };
+    let mut rect = RECT::default();
+    unsafe {
+        let _ = GetClientRect(dialog, &mut rect);
+    }
+    // The band between the address box and the label of the code box holds
+    // the note. The hole is in the middle of it, with plate left on every side.
+    let to_client = |id: u16, top: bool| {
+        let control = unsafe { GetDlgItem(Some(dialog), id.into()) }.unwrap();
+        let mut at = RECT::default();
+        unsafe {
+            let _ = GetWindowRect(control, &mut at);
+        }
+        let mut point = windows::Win32::Foundation::POINT {
+            x: at.left,
+            y: if top { at.top } else { at.bottom },
+        };
+        unsafe {
+            let _ = ScreenToClient(dialog, &mut point);
+        }
+        point.y
+    };
+    let (from, to) = (to_client(ID_ADDRESS, false), to_client(ID_CODE_LABEL, true));
+    let middle = (from + to) / 2;
+    let surface = crate::win::surface::Surface::new(rect.right.max(1), rect.bottom.max(1)).unwrap();
+    unsafe {
+        let all = CreateRectRgn(0, 0, rect.right, rect.bottom);
+        let hole = CreateRectRgn(120, middle - 4, 220, middle + 4);
+        let seen = CreateRectRgn(0, 0, 0, 0);
+        CombineRgn(Some(seen), Some(all), Some(hole), RGN_COMBINE_MODE(4));
+        SelectClipRgn(surface.hdc, Some(seen));
+        SendMessageW(
+            dialog,
+            TEST_PAINT_WINDOW,
+            Some(WPARAM(surface.hdc.0 as usize)),
+            None,
+        );
+        for region in [all, hole, seen] {
+            let _ = DeleteObject(HGDIOBJ(region.0));
+        }
+    }
+}
+
 /// Has the dialog print itself into memory, as a picture of it does. That
 /// is not the screen.
 fn print_to_memory(dialog: HWND) {
@@ -519,6 +569,30 @@ fn the_window_grows_with_the_status_line_and_the_controls_follow() {
     assert!(shown.unwrap().is_none());
 }
 
+/// Whether a picture of `width` pixels across has the title of the dialog
+/// where it is drawn (24 DIPs from the top left of the client area, which is
+/// at `offset`): something there that is not the colour of the corner. A
+/// frame around the client area, or the controls, do not draw it.
+fn scene_is_there(pixels: &[u8], width: i32, offset: (i32, i32), dpi: u32) -> bool {
+    let scale = dpi as f32 / 96.0;
+    let at = |x: i32, y: i32| -> Option<[u8; 3]> {
+        let index = ((y * width + x) * 4) as usize;
+        let pixel = pixels.get(index..index + 3)?;
+        Some([pixel[0], pixel[1], pixel[2]])
+    };
+    let Some(corner) = at(offset.0 + 2, offset.1 + 2) else {
+        return false;
+    };
+    let (left, top) = (
+        offset.0 + (24.0 * scale) as i32,
+        offset.1 + (24.0 * scale) as i32,
+    );
+    let (across, down) = ((150.0 * scale) as i32, (24.0 * scale) as i32);
+    (top..top + down)
+        .flat_map(|y| (left..left + across).map(move |x| (x, y)))
+        .any(|(x, y)| at(x, y).is_some_and(|pixel| pixel != corner))
+}
+
 /// Saves what the dialog shows as a BMP named `name` in the folder that
 /// `ULLAGE_DIALOG_SHOTS` names, when it names one. `PrintWindow` is asked
 /// first, because it gives the whole window, with its title bar. When what it
@@ -548,20 +622,23 @@ fn shoot(dialog: HWND, name: &str, mode: Mode) {
         let _ = GetWindowRect(dialog, &mut rect);
     }
     let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
-    let one_colour = |surface: &mut crate::win::surface::Surface| {
-        let first = surface.pixels_mut()[..3].to_vec();
-        surface
-            .pixels_mut()
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .all(|pixel| pixel[..3] == first[..])
+    // Where the client area is in a picture of the whole window, and the DPI.
+    let mut client = windows::Win32::Foundation::POINT::default();
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::ClientToScreen(dialog, &mut client);
+    }
+    let offset = (client.x - rect.left, client.y - rect.top);
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(dialog) }.max(96);
+    // The scene is what only the dialog itself draws (the title). A picture
+    // that has a frame, or controls, and no scene is not a picture of it.
+    let has_scene = |surface: &mut crate::win::surface::Surface, offset| {
+        scene_is_there(surface.pixels_mut(), width, offset, dpi)
     };
     let mut surface = crate::win::surface::Surface::new(width, height).unwrap();
     unsafe {
         let _ = PrintWindow(dialog, surface.hdc, 2);
     }
-    if one_colour(&mut surface) {
+    if !has_scene(&mut surface, offset) {
         surface = crate::win::surface::Surface::new(width, height).unwrap();
         unsafe {
             SendMessageW(
@@ -573,14 +650,14 @@ fn shoot(dialog: HWND, name: &str, mode: Mode) {
         }
         // The text of the address box is added to a picture of the window
         // only when the window drew itself: it is not to cover a blank one.
-        if !one_colour(&mut surface) {
+        if has_scene(&mut surface, offset) {
             write_address(dialog, &surface, rect, mode);
         }
     }
     // Last, when the window gave nothing: the scene of the dialog, drawn the
     // way the dialog draws it (`Ui`), with its buttons, but without the
     // native controls.
-    if one_colour(&mut surface) {
+    if !has_scene(&mut surface, offset) {
         surface = crate::win::surface::Surface::new(width, height).unwrap();
         let ui = Ui::new(mode, 96).unwrap();
         ui.draw_dialog_with_buttons(
@@ -591,7 +668,12 @@ fn shoot(dialog: HWND, name: &str, mode: Mode) {
         )
         .expect("the scene of the dialog is drawn");
     }
-    assert!(!one_colour(&mut surface), "the picture of {name} is blank");
+    // A picture of the scene alone has no frame around it: its client area is
+    // at the origin.
+    assert!(
+        has_scene(&mut surface, offset) || has_scene(&mut surface, (0, 0)),
+        "the picture of {name} has no scene"
+    );
     let pixels = surface.pixels_mut();
     // The alpha of a window that is drawn by the system can be 0.
     for pixel in pixels.as_chunks_mut::<4>().0 {
@@ -757,7 +839,13 @@ fn the_window_prints_itself_in_the_colours_of_the_mode() {
 fn a_path_that_is_not_encrypted_is_paired_with_only_after_its_note_was_drawn() {
     let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
     let driver = drive(|dialog| {
-        let still_there = |dialog: HWND| unsafe { IsWindow(Some(dialog)) }.as_bool();
+        // A press that is refused leaves what was typed in the boxes: a press
+        // that is taken empties them, whatever the window does next.
+        let still_there = |dialog: HWND| {
+            unsafe { IsWindow(Some(dialog)) }.as_bool()
+                && text_of(dialog, ID_ADDRESS) == "center:7878"
+                && text_of(dialog, ID_CODE) == "ABC-DEF"
+        };
         // The code is whole. The address is typed, and the main button is
         // pressed at once: nothing has been drawn, and the press is not the
         // user's word.
@@ -788,6 +876,11 @@ fn a_path_that_is_not_encrypted_is_paired_with_only_after_its_note_was_drawn() {
         paint_on_window_cropped(dialog, note_top + 20);
         press(dialog, ID_OK);
         assert!(still_there(dialog), "paired with half of the note");
+        // And with a hole in the middle of it, which a box round what shows
+        // does not see.
+        paint_on_window_with_a_hole(dialog);
+        press(dialog, ID_OK);
+        assert!(still_there(dialog), "paired with a hole in the note");
         // Once the whole note is on the window, the next press counts.
         paint_on_window(dialog);
         press(dialog, ID_OK);
@@ -811,8 +904,9 @@ fn a_note_that_was_seen_is_forgotten_when_the_address_changes() {
         set_text(dialog, ID_ADDRESS, "nas:7878");
         set_text(dialog, ID_ADDRESS, "center:7878");
         press(dialog, ID_OK);
-        assert!(
-            unsafe { IsWindow(Some(dialog)) }.as_bool(),
+        assert_eq!(
+            (text_of(dialog, ID_ADDRESS), text_of(dialog, ID_CODE)),
+            ("center:7878".to_owned(), "ABC-DEF".to_owned()),
             "paired with a note that was not seen again"
         );
         paint_on_window(dialog);
@@ -903,4 +997,39 @@ fn the_scene_picture_has_the_buttons_in_their_states() {
             "main button, enabled: {enabled}"
         );
     }
+}
+
+#[test]
+fn a_picture_with_a_frame_and_no_title_is_not_taken_for_the_dialog() {
+    let (width, height) = (300usize, 120usize);
+    let mut pixels = vec![200u8; width * height * 4];
+    let put = |pixels: &mut Vec<u8>, x: usize, y: usize, value: u8| {
+        let at = (y * width + x) * 4;
+        pixels[at..at + 3].fill(value);
+    };
+    // A frame of another colour all round, and a control in the middle.
+    for x in 0..width {
+        for y in [0, 1, height - 1, height - 2] {
+            put(&mut pixels, x, y, 30);
+        }
+    }
+    for x in 100..180 {
+        for y in 60..90 {
+            put(&mut pixels, x, y, 90);
+        }
+    }
+    assert!(!scene_is_there(&pixels, width as i32, (0, 0), 96));
+    // The title: dark pixels where it is drawn.
+    for x in 30..80 {
+        put(&mut pixels, x, 34, 20);
+    }
+    assert!(scene_is_there(&pixels, width as i32, (0, 0), 96));
+    // With the client area inside a frame of 8 pixels, the title is 8 further.
+    let mut framed = vec![200u8; width * height * 4];
+    for x in 38..88 {
+        put(&mut framed, x, 42, 20);
+    }
+    assert!(scene_is_there(&framed, width as i32, (8, 8), 96));
+    // Nothing to look at.
+    assert!(!scene_is_there(&[], 10, (0, 0), 96));
 }

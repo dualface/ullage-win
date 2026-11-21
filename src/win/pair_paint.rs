@@ -6,14 +6,15 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use windows::Win32::Foundation::{COLORREF, RECT};
+use windows::Win32::Foundation::{COLORREF, POINT, RECT};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory, ID2D1Factory,
 };
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET,
-    DeleteObject, GetClipBox, GetObjectType, HBRUSH, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS,
-    SRCCOPY,
+    BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CombineRgn, CreateFontW, CreateRectRgn,
+    CreateSolidBrush, DEFAULT_CHARSET, DeleteObject, GetClipRgn, GetDCOrgEx, GetObjectType,
+    GetRandomRgn, GetRgnBox, HBRUSH, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, OffsetRgn,
+    RGN_COMBINE_MODE, SRCCOPY,
 };
 use windows::core::{Interface, Result};
 
@@ -23,8 +24,8 @@ use super::text::Typography;
 #[cfg(test)]
 use crate::scene::pair::primary_label;
 use crate::scene::pair::{
-    ButtonState, CODE_FONT, EDIT_FONT, Focus, Kind, LABEL_FONT, Model, Status, button_shapes,
-    frame, status, to_pixels,
+    ButtonState, CODE_FONT, EDIT_FONT, Focus, Frame, Kind, LABEL_FONT, Model, Status,
+    button_shapes, frame, status, to_pixels,
 };
 use crate::scene::{Font, Rect, Shape};
 use crate::theme::{Color, Mode, Role};
@@ -43,12 +44,50 @@ pub fn is_dc(hdc: HDC) -> bool {
     matches!(unsafe { GetObjectType(HGDIOBJ(hdc.0)) }, 3 | 10)
 }
 
-/// The bounding box of what can be drawn on `hdc` (its clip region), in
-/// pixels, or `None` when nothing can.
-fn clip_box(hdc: HDC) -> Option<RECT> {
-    let mut rect = RECT::default();
-    // `NULLREGION` is 1 and `ERROR` is 0.
-    (unsafe { GetClipBox(hdc, &mut rect) }.0 > 1).then_some(rect)
+/// Whether every pixel of `rect` (x, y, width, height, in the pixels of the
+/// device context) can be seen on it: it is in the region of the device
+/// context that the system gives (what shows of the window: not off the
+/// screen, not under another window, not outside what is to be painted) and
+/// in the clip region that was selected into it. A box around what shows is not
+/// enough, because what shows can have a hole.
+fn fully_visible(hdc: HDC, rect: (i32, i32, i32, i32)) -> bool {
+    const RGN_OR: RGN_COMBINE_MODE = RGN_COMBINE_MODE(2);
+    const RGN_DIFF: RGN_COMBINE_MODE = RGN_COMBINE_MODE(4);
+    const SYSRGN: i32 = 4;
+    const NULLREGION: i32 = 1;
+    let (x, y, w, h) = rect;
+    unsafe {
+        let note = CreateRectRgn(x, y, x + w, y + h);
+        let uncovered = CreateRectRgn(0, 0, 0, 0);
+        let scratch = CreateRectRgn(0, 0, 0, 0);
+        let mut origin = POINT::default();
+        let mut visible = GetDCOrgEx(hdc, &mut origin).as_bool() && {
+            // What the system gives is in the coordinates of the screen.
+            let system = CreateRectRgn(0, 0, 0, 0);
+            let got = GetRandomRgn(hdc, system, SYSRGN) == 1;
+            if got {
+                OffsetRgn(system, -origin.x, -origin.y);
+                CombineRgn(Some(uncovered), Some(note), Some(system), RGN_DIFF);
+            }
+            let _ = DeleteObject(HGDIOBJ(system.0));
+            got
+        };
+        if visible {
+            // And what was selected as the clip region, when one was.
+            let clip = CreateRectRgn(0, 0, 0, 0);
+            if GetClipRgn(hdc, clip) == 1 {
+                CombineRgn(Some(scratch), Some(note), Some(clip), RGN_DIFF);
+                CombineRgn(Some(uncovered), Some(uncovered), Some(scratch), RGN_OR);
+            }
+            let _ = DeleteObject(HGDIOBJ(clip.0));
+            let mut left = RECT::default();
+            visible = GetRgnBox(uncovered, &mut left).0 == NULLREGION;
+        }
+        for region in [note, uncovered, scratch] {
+            let _ = DeleteObject(HGDIOBJ(region.0));
+        }
+        visible
+    }
 }
 
 /// A font of `font`'s size in DIPs, for a window at `dpi`.
@@ -237,6 +276,25 @@ impl Ui {
         address: &str,
         on_screen: bool,
     ) -> Result<()> {
+        let (frame, shapes) = self.dialog_shapes(size, address);
+        self.draw(hdc, size, &shapes)?;
+        // The note is on the screen now, wholly: that address may be paired
+        // with. A copy that went through but left the note, or a part of it,
+        // out is not enough.
+        if on_screen
+            && status(address) == Status::Plaintext
+            && frame
+                .note
+                .is_some_and(|note| fully_visible(hdc, to_pixels(note, self.dpi.get())))
+        {
+            *self.noted.borrow_mut() = Some(address.to_owned());
+        }
+        Ok(())
+    }
+
+    /// The layout and the shapes of the dialog for `address`, on a background
+    /// of `size` pixels.
+    fn dialog_shapes(&self, size: (i32, i32), address: &str) -> (Frame, Vec<Shape>) {
         let model = Model {
             address: address.to_owned(),
             focus: self.focus.get(),
@@ -249,25 +307,8 @@ impl Ui {
             fill: Some(Role::Win),
             border: None,
         }];
-        shapes.extend(frame.shapes);
-        // What the device context shows is what its clip box says: a window
-        // that is partly off the screen, or partly covered, gets a smaller one.
-        let clip = clip_box(hdc);
-        self.draw(hdc, size, &shapes)?;
-        // The note is on the screen now, wholly: that address may be paired
-        // with. A copy that went through but left the note out is not enough.
-        if on_screen
-            && status(address) == Status::Plaintext
-            && frame.note.is_some_and(|note| {
-                let (x, y, w, h) = to_pixels(note, self.dpi.get());
-                clip.is_some_and(|clip| {
-                    clip.left <= x && clip.top <= y && clip.right >= x + w && clip.bottom >= y + h
-                })
-            })
-        {
-            *self.noted.borrow_mut() = Some(address.to_owned());
-        }
-        Ok(())
+        shapes.extend(frame.shapes.iter().cloned());
+        (frame, shapes)
     }
 
     /// The dialog as `draw_dialog` draws it, with its two buttons too, the
@@ -281,19 +322,7 @@ impl Ui {
         address: &str,
         primary_enabled: bool,
     ) -> Result<()> {
-        let model = Model {
-            address: address.to_owned(),
-            focus: self.focus.get(),
-        };
-        let frame = frame(&model, &*self.typography);
-        let scale = self.dpi.get() as f32 / 96.0;
-        let mut dialog = vec![Shape::Rect {
-            rect: Rect::new(0.0, 0.0, size.0 as f32 / scale, size.1 as f32 / scale),
-            radius: 0.0,
-            fill: Some(Role::Win),
-            border: None,
-        }];
-        dialog.extend(frame.shapes.iter().cloned());
+        let (frame, dialog) = self.dialog_shapes(size, address);
         let label = primary_label(&status(address));
         let primary = button_shapes(
             Kind::Primary,
