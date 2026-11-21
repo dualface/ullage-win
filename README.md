@@ -1,9 +1,10 @@
 # ullage-win
 
 A floating Windows window that shows the subscription usage of every account
-your local [ullage](https://github.com/dualface/ullage-cli) daemon knows. It
-shows the same accounts, rows, names, readings and reset times as `ullage tui`,
-drawn as a modern Windows window instead of a terminal screen.
+your local [ullage](https://github.com/dualface/ullage-cli) daemon knows. Its
+card layouts show the same accounts, rows, names, readings and reset times as
+`ullage tui`, drawn as a modern Windows window instead of a terminal screen;
+the compact strip shows less (see below).
 
 - A borderless window that stays on top, with a tray icon.
 - Three layouts: two columns, one card per row, and a compact strip with one

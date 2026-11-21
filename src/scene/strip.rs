@@ -298,6 +298,29 @@ mod tests {
         for hidden in ["10%", "weekly", "5h", "account-0"] {
             assert!(!shown.contains(&hidden), "{hidden} is drawn");
         }
+        // The bar is the weekly row's too: 73% lights seven cells.
+        let lit = scene
+            .content
+            .iter()
+            .filter(|shape| {
+                matches!(shape, Shape::Rect { radius, rect, fill: Some(role), .. }
+                    if *radius == 1.0 && rect.w == 4.0 && *role != Role::Track)
+            })
+            .count();
+        assert_eq!(lit, 7);
+    }
+
+    #[test]
+    fn a_label_wider_than_its_reserved_room_keeps_that_room() {
+        let mut cards = sample_cards(1);
+        cards[0].title.provider = "openrouter".into();
+        cards[0].rows[1].reading = Reading::Credits("1234 of 50000".into());
+        cards[0].rows[1].resets_in = Some(36 * 3600);
+        let scene = build(&input(&cards), &FakeMeasure);
+        let label = text_of(&scene.content, "openrouter");
+        assert_eq!(label.rect.w, 60.0);
+        assert!(text_of(&scene.content, "1234 of 50000").ellipsis);
+        assert_lines_fit(&scene);
     }
 
     #[test]
@@ -442,8 +465,11 @@ mod tests {
         ));
         let scene = build(&input(&cards), &FakeMeasure);
         let label = text_of(&scene.content, "claude-1");
-        assert_eq!((label.font.weight, label.color), (700, Role::Accent));
-        text_of(&scene.content, "claude-2");
+        assert_eq!(
+            (label.font.weight, label.color, label.rect.y),
+            (700, Role::Accent, 0.0)
+        );
+        assert_eq!(text_of(&scene.content, "claude-2").rect.y, 28.0);
         text_of(&scene.content, "codex");
         let shown: Vec<&str> = texts(&scene.content)
             .iter()

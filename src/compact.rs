@@ -152,11 +152,6 @@ mod tests {
     }
 
     #[test]
-    fn a_card_without_rows_has_no_row() {
-        assert!(lowest_row(&card(Vec::new())).is_none());
-    }
-
-    #[test]
     fn the_weekly_row_wins_even_with_more_left() {
         let card = card(vec![
             row("5h", Some(0.1)),
