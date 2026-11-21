@@ -44,6 +44,7 @@ tray menu.
 Use `Connection` > `Local daemon` to switch back, and `Forget remote daemon` to
 remove the pairing. Prefer a Tailscale address: on other networks the traffic
 is not encrypted.
+See [docs/remote-daemon.md](docs/remote-daemon.md) for the details.
 
 ## License
 

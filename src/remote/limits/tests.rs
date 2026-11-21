@@ -410,7 +410,7 @@ fn the_largest_reply_is_within_the_limits_and_makes_every_card() {
 }
 
 #[test]
-fn the_readme_tells_the_limits_that_the_code_has() {
+fn the_remote_daemon_doc_tells_the_limits_that_the_code_has() {
     let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let told = format!(
         "a reply with more than {MAX_SNAPSHOTS} accounts, more than {MAX_WINDOWS} windows in an \
@@ -421,5 +421,5 @@ fn the_readme_tells_the_limits_that_the_code_has() {
          label, window, reading or unit text of more than {MAX_STRING_BYTES} bytes, or more than {} KiB of text",
         MAX_EXPANDED_BYTES / 1024
     );
-    assert!(words(include_str!("../../../README.md")).contains(&told));
+    assert!(words(include_str!("../../../docs/remote-daemon.md")).contains(&told));
 }
