@@ -5,6 +5,7 @@ use super::{
     text_box_width,
 };
 use crate::display::countdown_label;
+use crate::state::REFRESH_SECS;
 use crate::theme::Role;
 
 const FULL_HEIGHT: f32 = 40.0;
@@ -56,6 +57,33 @@ const STRIP: Metrics = Metrics {
     ring_gap: 6.0,
     button: (32.0, 30.0),
 };
+
+/// The least room kept between the name and the ring on the strip.
+pub(super) const STRIP_NAME_GAP: f32 = 8.0;
+
+/// The narrowest window whose strip title bar holds everything: the icon,
+/// the name, the ring, the longest countdown label (`REFRESH_SECS` as
+/// minutes and seconds, the most the label ever reads) and the button, with
+/// [`STRIP_NAME_GAP`] before the ring. It uses the same numbers as [`build`].
+pub(super) fn strip_min_width(measure: &dyn Measure) -> f32 {
+    let m = &STRIP;
+    let name_w = text_box_width(measure, "Ullage", font(FontKind::Ui, m.name_size, 600));
+    let label = countdown_label(REFRESH_SECS);
+    let label_w = text_box_width(measure, &label, font(FontKind::Mono, m.label_size, 400));
+    BORDER
+        + m.pad_left
+        + m.icon
+        + m.icon_gap
+        + name_w
+        + STRIP_NAME_GAP
+        + m.ring
+        + m.ring_gap
+        + label_w
+        + m.ring_gap
+        + m.button.0
+        + m.pad_right
+        + BORDER
+}
 
 pub fn build(input: &Input, width: f32, strip: bool, measure: &dyn Measure) -> Title {
     let metrics = if strip { &STRIP } else { &FULL };
@@ -353,6 +381,116 @@ mod tests {
         assert_eq!(label.font.size, 11.0);
         let name = text_of(&scene.title, "Ullage");
         assert_eq!(name.font.size, 12.0);
+    }
+
+    /// Where each piece of the strip title bar is, left to right: the
+    /// icon, the name, the ring, the countdown label and the button.
+    fn strip_pieces(scene: &Scene) -> Vec<(&'static str, Rect)> {
+        let icon = scene
+            .title
+            .iter()
+            .find_map(|shape| match shape {
+                Shape::Icon {
+                    icon: Icon::Container { .. },
+                    rect,
+                    ..
+                } => Some(*rect),
+                _ => None,
+            })
+            .unwrap();
+        let ring = scene
+            .title
+            .iter()
+            .find_map(|shape| match shape {
+                Shape::Ring {
+                    cx,
+                    cy,
+                    radius,
+                    width,
+                    ..
+                } => {
+                    let reach = radius + width / 2.0;
+                    Some(Rect::new(cx - reach, cy - reach, 2.0 * reach, 2.0 * reach))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut pieces = vec![
+            ("icon", icon),
+            ("name", text_of(&scene.title, "Ullage").rect),
+            ("ring", ring),
+            ("label", text_of(&scene.title, "2m00s").rect),
+            ("button", hit(scene, Target::Expand).unwrap()),
+        ];
+        pieces.sort_by(|a, b| a.1.x.partial_cmp(&b.1.x).unwrap());
+        pieces
+    }
+
+    #[test]
+    fn the_narrowest_strip_holds_its_whole_title_bar_with_the_longest_countdown() {
+        use super::super::cards::tests::{card, row};
+        use ullage_cli::usage_view::Reading;
+        let cards = vec![card(
+            "grok",
+            None,
+            "account-1",
+            vec![row(
+                "weekly",
+                Reading::Remaining("5%".into()),
+                Some(0.05),
+                None,
+            )],
+        )];
+        let mut input = input(Layout::Compact, None);
+        input.body = Body::Cards(&cards);
+        input.countdown = (1.0, 120);
+        let scene = build(&input, &FakeMeasure);
+        // One short label: the strip is as narrow as it gets, and the bar
+        // needs less than that.
+        assert_eq!(scene.width, MIN_WIDTH_COMPACT);
+        assert!(title::strip_min_width(&FakeMeasure) <= MIN_WIDTH_COMPACT);
+        let pieces = strip_pieces(&scene);
+        for (name, rect) in &pieces {
+            assert!(
+                rect.x >= BORDER && rect.right() <= scene.width - BORDER,
+                "{name} leaves the window: {rect:?}"
+            );
+        }
+        for pair in pieces.windows(2) {
+            assert!(
+                pair[0].1.right() <= pair[1].1.x,
+                "{} overlaps {}",
+                pair[0].0,
+                pair[1].0
+            );
+        }
+    }
+
+    #[test]
+    fn the_least_width_of_the_strip_title_bar_leaves_the_name_its_gap() {
+        let mut input = input(Layout::Compact, None);
+        input.countdown = (1.0, 120);
+        let width = title::strip_min_width(&FakeMeasure);
+        let bar = title::build(&input, width, true, &FakeMeasure);
+        let scene = Scene {
+            width,
+            height: 0.0,
+            content_top: 0.0,
+            view_height: 0.0,
+            content_height: 0.0,
+            title: bar.shapes,
+            content: Vec::new(),
+            hits: bar.hits,
+            card_rects: Vec::new(),
+        };
+        let pieces = strip_pieces(&scene);
+        let gap = |a: &str, b: &str| {
+            let find = |name: &str| pieces.iter().find(|piece| piece.0 == name).unwrap().1;
+            find(b).x - find(a).right()
+        };
+        // The ring is 12 wide; its stroke is a little narrower than that.
+        assert!((gap("name", "ring") - title::STRIP_NAME_GAP).abs() < 0.6);
+        assert_eq!(pieces.last().unwrap().1.right(), width - BORDER - 2.0);
     }
 
     #[test]

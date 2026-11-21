@@ -2,10 +2,12 @@
 //! weekly row (or the row with the least left when there is none), that
 //! row's reading and reset, and a bar. No line names its row.
 
-use ullage_cli::usage_view::{UsageCard, UsageRow};
+use ullage_cli::usage_view::{Reading, UsageCard, UsageRow};
 
 use super::cards::ContentPad;
-use super::{Align, Content, FontKind, Measure, Rect, Shape, font, text, text_box_width};
+use super::{
+    Align, BORDER, Content, Font, FontKind, Measure, Rect, Shape, font, text, text_box_width,
+};
 use crate::compact::{labels, reset_text, strip_row};
 use crate::display::{BAR_CELLS, Bar, ReadingText, bar, reading_text};
 use crate::theme::Role;
@@ -29,6 +31,12 @@ const CELL_GAP: f32 = 1.0;
 /// own: enough for `claude-2` at the default text size. A shorter label
 /// keeps its own width.
 const MIN_LABEL_WIDTH: f32 = 60.0;
+/// The longest reset text `reset_text` gives; the reset column is always
+/// this wide, so the window does not change width when a reset appears.
+const RESET_RESERVE: &str = "36h00m";
+/// The widest number a reading holds; the reading column reserves it for
+/// every reading that is a number.
+const READING_RESERVE: &str = "100%";
 
 /// What one line shows; an account with no row reads `no data`.
 struct Line<'a> {
@@ -39,6 +47,89 @@ struct Line<'a> {
     reset: Option<String>,
 }
 
+/// The four fonts of a line, at the strip's scale.
+struct Fonts {
+    value: Font,
+    prefix: Font,
+    reset: Font,
+    label: Font,
+}
+
+impl Fonts {
+    fn new(scale: f32) -> Self {
+        Self {
+            value: font(FontKind::Mono, 12.0 * scale, 600),
+            prefix: font(FontKind::Mono, 11.0 * scale, 400),
+            reset: font(FontKind::Mono, 11.0 * scale, 400),
+            label: font(FontKind::Mono, 12.0 * scale, 700),
+        }
+    }
+}
+
+/// What a line's reading says; an account with no row reads `no data`.
+fn line_reading(row: Option<&UsageRow>) -> ReadingText {
+    match row {
+        Some(row) => reading_text(&row.reading, row.severity),
+        None => ReadingText {
+            prefix: None,
+            value: "no data".into(),
+            color: Role::Faint,
+        },
+    }
+}
+
+/// A prefix and the space after it.
+fn prefix_width(word: &str, fonts: &Fonts, measure: &dyn Measure) -> f32 {
+    text_box_width(measure, word, fonts.prefix) + measure.width(" ", fonts.prefix)
+}
+
+/// The room a line's reading is given, whatever its number says: a number
+/// takes the room of `100%`, with its prefix when it has one. Words
+/// (`unlimited`, `disabled`, `no data`) take their own width, so the width
+/// changes only when a reading changes kind.
+fn reserved_reading_width(row: Option<&UsageRow>, fonts: &Fonts, measure: &dyn Measure) -> f32 {
+    let reading = line_reading(row);
+    let is_word = matches!(
+        row.map(|row| &row.reading),
+        None | Some(Reading::CreditsUnlimited | Reading::Disabled)
+    );
+    let value = if is_word {
+        &reading.value
+    } else {
+        READING_RESERVE
+    };
+    text_box_width(measure, value, fonts.value)
+        + reading
+            .prefix
+            .map_or(0.0, |word| prefix_width(word, fonts, measure))
+}
+
+fn reset_column_width(fonts: &Fonts, measure: &dyn Measure) -> f32 {
+    text_box_width(measure, RESET_RESERVE, fonts.reset)
+}
+
+/// The window width that fits every line: the widest label, the widest
+/// reserved reading, the reset column and the bar, with the paddings, the
+/// gaps and the frame. [`build`] lays its lines out in the width this
+/// gives, or in less when the window is capped.
+pub(super) fn needed_width(cards: &[UsageCard], scale: f32, measure: &dyn Measure) -> f32 {
+    let fonts = Fonts::new(scale);
+    let (mut label, mut reading) = (0.0f32, 0.0f32);
+    for (card, name) in cards.iter().zip(labels(cards)) {
+        label = label.max(text_box_width(measure, &name, fonts.label));
+        reading = reading.max(reserved_reading_width(strip_row(card), &fonts, measure));
+    }
+    2.0 * (PAD_SIDE + ROW_PAD)
+        + label
+        + COLUMN_GAP
+        + reading
+        + COLUMN_GAP
+        + reset_column_width(&fonts, measure)
+        + COLUMN_GAP
+        + BAR_WIDTH
+        + 2.0 * BORDER
+}
+
 pub(super) fn build(
     body: &mut Content,
     cards: &[UsageCard],
@@ -46,10 +137,7 @@ pub(super) fn build(
     scale: f32,
     measure: &dyn Measure,
 ) {
-    let value_font = font(FontKind::Mono, 12.0 * scale, 600);
-    let prefix_font = font(FontKind::Mono, 11.0 * scale, 400);
-    let reset_font = font(FontKind::Mono, 11.0 * scale, 400);
-    let label_font = font(FontKind::Mono, 12.0 * scale, 700);
+    let fonts = Fonts::new(scale);
     let lines: Vec<Line> = cards
         .iter()
         .zip(labels(cards))
@@ -62,26 +150,17 @@ pub(super) fn build(
             }
         })
         .collect();
-    // The reset column is as wide as its longest text, and takes no room
-    // when no line has a reset.
-    let reset_col = lines
-        .iter()
-        .filter_map(|line| line.reset.as_deref())
-        .map(|reset| text_box_width(measure, reset, reset_font))
-        .fold(0.0, f32::max);
+    let reset_col = reset_column_width(&fonts, measure);
 
     let row_height = ROW_HEIGHT * scale;
     let left = PAD_SIDE + ROW_PAD;
     let right = inner_width - PAD_SIDE - ROW_PAD;
     // Shared columns from the right: bar, reset, then the right edge of the
-    // readings. Each line lays out its own reading and label.
+    // readings. The reset column keeps its room when a line has no reset.
+    // Each line lays out its own reading and label.
     let bar_x = right - BAR_WIDTH;
     let reset_right = bar_x - COLUMN_GAP;
-    let reading_right = if reset_col > 0.0 {
-        reset_right - reset_col - COLUMN_GAP
-    } else {
-        reset_right
-    };
+    let reading_right = reset_right - reset_col - COLUMN_GAP;
 
     for (index, line) in lines.iter().enumerate() {
         let y = index as f32 * row_height;
@@ -92,31 +171,21 @@ pub(super) fn build(
             border: None,
         });
 
-        let reading = match line.row {
-            Some(row) => reading_text(&row.reading, row.severity),
-            None => ReadingText {
-                prefix: None,
-                value: "no data".into(),
-                color: Role::Faint,
-            },
-        };
-        let label_full = text_box_width(measure, &line.label, label_font);
-        let prefix = reading.prefix.map(|word| {
-            (
-                word,
-                text_box_width(measure, word, prefix_font) + measure.width(" ", prefix_font),
-            )
-        });
+        let reading = line_reading(line.row);
+        let label_full = text_box_width(measure, &line.label, fonts.label);
+        let prefix = reading
+            .prefix
+            .map(|word| (word, prefix_width(word, &fonts, measure)));
         let fit = fit_reading(
             reading_right - left - label_full.min(MIN_LABEL_WIDTH) - COLUMN_GAP,
-            text_box_width(measure, &reading.value, value_font),
+            text_box_width(measure, &reading.value, fonts.value),
             prefix.map_or(0.0, |(_, width)| width),
         );
 
         body.shapes.push(text(
             Rect::new(reading_right - fit.value, y, fit.value, row_height),
             reading.value.clone(),
-            value_font,
+            fonts.value,
             reading.color,
             Align::Right,
             fit.value_cut,
@@ -128,11 +197,11 @@ pub(super) fn build(
                 Rect::new(
                     reading_left,
                     y,
-                    text_box_width(measure, word, prefix_font),
+                    text_box_width(measure, word, fonts.prefix),
                     row_height,
                 ),
                 word,
-                prefix_font,
+                fonts.prefix,
                 Role::Faint,
                 Align::Right,
                 false,
@@ -140,11 +209,11 @@ pub(super) fn build(
         }
 
         if let Some(reset) = &line.reset {
-            let reset_w = text_box_width(measure, reset, reset_font);
+            let reset_w = text_box_width(measure, reset, fonts.reset);
             body.shapes.push(text(
                 Rect::new(reset_right - reset_w, y, reset_w, row_height),
                 reset.clone(),
-                reset_font,
+                fonts.reset,
                 Role::Sub,
                 Align::Right,
                 false,
@@ -174,7 +243,7 @@ pub(super) fn build(
         body.shapes.push(text(
             Rect::new(left, y, label_full.min(avail), row_height),
             line.label.clone(),
-            label_font,
+            fonts.label,
             Role::Accent,
             Align::Left,
             true,
@@ -213,6 +282,9 @@ fn fit_reading(room: f32, value: f32, prefix: f32) -> ReadingFit {
 }
 
 #[cfg(test)]
+mod width_tests;
+
+#[cfg(test)]
 mod tests {
     use ullage_cli::usage_view::{Reading, UsageNotice};
 
@@ -222,7 +294,7 @@ mod tests {
     use super::{ReadingFit, fit_reading};
     use crate::prefs::Layout;
 
-    fn input<'a>(cards: &'a [UsageCard]) -> Input<'a> {
+    pub(super) fn input<'a>(cards: &'a [UsageCard]) -> Input<'a> {
         Input {
             layout: Layout::Compact,
             text_size: 13,
@@ -238,7 +310,7 @@ mod tests {
     fn each_account_is_one_28_dip_line_with_a_divider() {
         let cards = sample_cards(3);
         let scene = build(&input(&cards), &FakeMeasure);
-        assert_eq!(scene.width, 290.0);
+        assert_eq!(scene.width, 229.0);
         assert_eq!(scene.content_height, 3.0 * 28.0 + 4.0);
         let dividers: Vec<f32> = scene
             .content
@@ -491,9 +563,9 @@ mod tests {
             (11.0, 400, Role::Sub, Align::Right)
         );
         let reading = text_of(&scene.content, "73%");
-        // 290 wide, less the 1 DIP frame, 4 of padding and 8 inside the row:
-        // the bar starts 49 DIPs further left, the reset 8 before it.
-        let bar_x = 290.0 - 2.0 - 4.0 - 8.0 - 49.0;
+        // The window's width, less the 1 DIP frame, 4 of padding and 8 inside
+        // the row: the bar starts 49 DIPs further left, the reset 8 before it.
+        let bar_x = scene.width - 2.0 - 4.0 - 8.0 - 49.0;
         assert_eq!(reset.rect.right(), bar_x - 8.0);
         assert!(reading.rect.right() + 8.0 <= reset.rect.x);
     }
@@ -528,13 +600,16 @@ mod tests {
             .filter(|t| t.color == Role::Sub)
             .count();
         assert_eq!(resets, 2, "the codex and grok lines have no reset");
-        // The reading column moves left by the widest reset.
+        // The reading column ends before the reset column, which is as wide as
+        // `36h00m`: 6 characters of 6.6 DIPs, rounded up, plus one.
+        let reset_right = scene.width - 2.0 - 4.0 - 8.0 - 49.0 - 8.0;
+        assert_eq!(days.rect.right(), reset_right);
         let reading = text_of(&scene.content, "50%");
-        assert_eq!(reading.rect.right(), hours.rect.x - 8.0);
+        assert_eq!(reading.rect.right(), reset_right - 41.0 - 8.0);
     }
 
     #[test]
-    fn without_any_reset_the_reading_sits_next_to_the_bar() {
+    fn without_any_reset_the_reading_keeps_the_room_of_the_reset_column() {
         let cards = vec![card(
             "codex",
             None,
@@ -543,12 +618,15 @@ mod tests {
         )];
         let scene = build(&input(&cards), &FakeMeasure);
         let reading = text_of(&scene.content, "50%");
-        assert_eq!(reading.rect.right(), 290.0 - 2.0 - 4.0 - 8.0 - 49.0 - 8.0);
+        assert_eq!(
+            reading.rect.right(),
+            scene.width - 2.0 - 4.0 - 8.0 - 49.0 - 8.0 - 41.0 - 8.0
+        );
     }
 
     /// Fails when two texts of one line overlap or a text leaves the strip.
-    fn assert_lines_fit(scene: &Scene) {
-        let inner = 290.0 - 2.0;
+    pub(super) fn assert_lines_fit(scene: &Scene) {
+        let inner = scene.width - 2.0 * BORDER;
         let mut shown: Vec<&Text> = texts(&scene.content);
         shown.sort_by(|a, b| {
             (a.rect.y, a.rect.x)

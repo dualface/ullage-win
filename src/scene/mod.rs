@@ -24,7 +24,11 @@ use crate::theme::Role;
 pub const BORDER: f32 = 1.0;
 pub const WIDTH_COLUMNS: f32 = 800.0;
 pub const WIDTH_SINGLE: f32 = 400.0;
-pub const WIDTH_COMPACT: f32 = 290.0;
+/// The widest the compact strip gets, and the width of its loading and empty
+/// states.
+pub const MAX_WIDTH_COMPACT: f32 = 290.0;
+/// The narrowest the compact strip gets.
+pub const MIN_WIDTH_COMPACT: f32 = 200.0;
 /// Space kept free below a window that fills the work area.
 pub const WORK_AREA_MARGIN: f32 = 32.0;
 /// Lines a wheel notch scrolls, times the height of a line.
@@ -282,11 +286,21 @@ impl Scene {
     }
 }
 
-pub fn window_width(layout: Layout, body: &Body) -> f32 {
+/// The width of the window. The compact strip with accounts is as wide as
+/// its title bar and its widest line need, between [`MIN_WIDTH_COMPACT`] and
+/// [`MAX_WIDTH_COMPACT`]; that depends on the labels and the kinds of
+/// reading, never on a number. The other windows have a fixed width.
+pub fn window_width(layout: Layout, body: &Body, text_size: u32, measure: &dyn Measure) -> f32 {
     match (layout, body) {
         (Layout::Columns, _) => WIDTH_COLUMNS,
         (Layout::Single, _) | (Layout::Compact, Body::Unavailable(_)) => WIDTH_SINGLE,
-        (Layout::Compact, _) => WIDTH_COMPACT,
+        (Layout::Compact, Body::Cards(cards)) => {
+            let scale = text_size as f32 / BASE_TEXT_SIZE;
+            title::strip_min_width(measure)
+                .max(strip::needed_width(cards, scale, measure))
+                .clamp(MIN_WIDTH_COMPACT, MAX_WIDTH_COMPACT)
+        }
+        (Layout::Compact, _) => MAX_WIDTH_COMPACT,
     }
 }
 
@@ -297,7 +311,7 @@ fn is_strip(layout: Layout, body: &Body) -> bool {
 }
 
 pub fn build(input: &Input, measure: &dyn Measure) -> Scene {
-    let width = window_width(input.layout, &input.body);
+    let width = window_width(input.layout, &input.body, input.text_size, measure);
     let strip = is_strip(input.layout, &input.body);
     let scale = input.text_size as f32 / BASE_TEXT_SIZE;
     let inner_width = width - 2.0 * BORDER;
@@ -452,9 +466,11 @@ mod tests {
     #[test]
     fn the_window_width_follows_the_layout() {
         let loading = Body::Loading;
-        assert_eq!(window_width(Layout::Columns, &loading), 800.0);
-        assert_eq!(window_width(Layout::Single, &loading), 400.0);
-        assert_eq!(window_width(Layout::Compact, &loading), 290.0);
+        let width = |layout, body: &Body| window_width(layout, body, 13, &FakeMeasure);
+        assert_eq!(width(Layout::Columns, &loading), 800.0);
+        assert_eq!(width(Layout::Single, &loading), 400.0);
+        assert_eq!(width(Layout::Compact, &loading), 290.0);
+        assert_eq!(width(Layout::Compact, &Body::Empty), 290.0);
     }
 
     #[test]
@@ -462,8 +478,14 @@ mod tests {
         let failure =
             crate::state::failure_for(&ullage_cli::usage_view::FetchError::DaemonUnavailable);
         let body = Body::Unavailable(&failure);
-        assert_eq!(window_width(Layout::Compact, &body), 400.0);
-        assert_eq!(window_width(Layout::Columns, &body), 800.0);
+        assert_eq!(
+            window_width(Layout::Compact, &body, 13, &FakeMeasure),
+            400.0
+        );
+        assert_eq!(
+            window_width(Layout::Columns, &body, 13, &FakeMeasure),
+            800.0
+        );
     }
 
     #[test]
