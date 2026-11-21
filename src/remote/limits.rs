@@ -21,8 +21,8 @@ use ullage_protocol::{
 pub const MAX_SNAPSHOTS: usize = 64;
 /// Windows of one account. Real: at most 15 (`sub2api` writes 15 of its own).
 pub const MAX_WINDOWS: usize = 64;
-/// Readings of one window. Real: at most 11 (`cursor` writes 10 of its own,
-/// and the categories of the vendor).
+/// Readings of one window. Real: `cursor` writes 10 of its own and one for each
+/// category of the vendor (11 in the sample of its tests), `sub2api` at most 6.
 pub const MAX_MEASUREMENTS_PER_WINDOW: usize = 64;
 /// Readings of the whole reply. Real: at most 68 for one `sub2api` account.
 pub const MAX_MEASUREMENTS: usize = 512;
