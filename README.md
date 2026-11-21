@@ -123,28 +123,25 @@ On the host that runs the daemon:
 
 On this host:
 
-1. Choose `Connection` > `Pair...` in the tray menu. A dialog opens with two
-   boxes.
-2. In `Address`, type `<host>:<port>` of the daemon, for example
+1. Choose `Connection` > `Pair...` in the tray menu. A dialog opens, in the
+   colours of the system's light or dark mode.
+2. In `ADDRESS`, type `<host>:<port>` of the daemon, for example
    `100.71.140.68:7878` or `center:7878`. The host is an IPv4 address or a host
-   name. The box starts with the address of the last pairing. A line under the
-   box says why an address is not taken.
-3. In `Pair code`, type the code, for example `ABC-DEF`. The box takes only the
+   name. The box starts with the address of the last pairing. Under the box, a
+   red line says why an address is not taken.
+3. In `PAIR CODE`, type the code, for example `ABC-DEF`. The box takes only the
    characters the daemon uses for a code (letters in capitals, and the digits 2
    to 9, without `I`, `L`, `O` and `U`), writes them in capitals, and adds the
    hyphen after the third character. A code that you paste in is made into the
-   same form. `OK` can be pressed only when the address is taken and the code
+   same form. `Pair` can be pressed only when the address is taken and the code
    is complete, in the form `XXX-XXX`.
-4. Press `OK` (or Enter). When the address is one that the menu marks
+4. Press `Pair` (or Enter). When the address is one that the menu marks
    `(plaintext)` (see below: a loopback address, a Tailscale address, `localhost`
-   and names that end in `.ts.net` are not), the window first asks whether to
-   go on, because the code and the token may then cross the network as plain
-   text. Then the window pairs, saves the token, and
-   starts to show that daemon. `Cancel` and Esc close the dialog and send
-   nothing.
-
-The dialog is a plain Windows dialog: it does not follow the dark mode of the
-system.
+   and names that end in `.ts.net` are not), a yellow note under the address
+   says that the code and the token may then cross the network as plain text,
+   and the button reads `Pair anyway`: pressing it is your word that this is
+   all right. Then the window pairs, saves the token, and starts to show that
+   daemon. `Cancel` and Esc close the dialog and send nothing.
 
 Use `Connection` > `Local daemon` to go back to the daemon of this host, and
 `Connection` > `Forget remote daemon` to delete the token and the address.
@@ -177,7 +174,7 @@ Some points to know:
   (carrier-grade NAT): when the daemon is not reached through Tailscale, the
   traffic is not encrypted, although the menu entry does not say so. On any other address, that is a
   private network address, the token and the usage cross the network as plain
-  text, and the menu entry and the question before pairing say `(plaintext)`.
+  text, and the menu entry says `(plaintext)` and the pairing dialog says so too.
   A host name is judged by its spelling, not by where it points: `localhost`
   and names that end in `.ts.net` are taken to be encrypted, and every other
   name says `(plaintext)`, even when it points to a Tailscale address. A
