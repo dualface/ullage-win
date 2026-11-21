@@ -25,9 +25,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassExW, RegisterWindowMessageW, SPI_SETWORKAREA, SW_SHOW, SetTimer,
     SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE, WM_CONTEXTMENU, WM_DISPLAYCHANGE,
     WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_HOTKEY, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_QUERYENDSESSION,
-    WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP,
+    WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::BOOL;
 use windows::core::{PCWSTR, w};
@@ -195,10 +195,18 @@ fn dispatch(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Reply {
             WM_RBUTTONUP | WM_CONTEXTMENU => Reply::Menu(app.tray_menu_anchor()),
             _ => Reply::Done(0),
         },
-        // A right click anywhere on the window, the title bar and the drag
-        // areas included, and Shift+F10 or the menu key. Not passing it on
-        // keeps the system menu away from the title bar.
+        // A right click on the cards and the buttons, and Shift+F10 or the
+        // menu key.
         WM_CONTEXTMENU => Reply::Menu(app.context_menu_anchor((x_of(lparam.0), y_of(lparam.0)))),
+        // A right click on a drag spot (`HTCAPTION`: the title bar, the
+        // blank space, the whole compact strip but its button) brings no
+        // `WM_CONTEXTMENU`: the default handling of the press offers only a
+        // system menu, which this window has not. So the press is kept from
+        // it, and the release opens the menu.
+        WM_NCRBUTTONDOWN if wparam.0 as u32 == HTCAPTION => Reply::Done(0),
+        WM_NCRBUTTONUP if wparam.0 as u32 == HTCAPTION => {
+            Reply::Menu(app.context_menu_anchor((x_of(lparam.0), y_of(lparam.0))))
+        }
         WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => {
             app.toggle_visible();
             Reply::Done(0)
