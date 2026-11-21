@@ -10,7 +10,8 @@ your [ullage](https://github.com/dualface/ullage-cli) daemon knows.
 
 ## Install
 
-Download `ullage-win-x86_64-setup.exe` from the build artifacts of the `release` workflow and run it. No
+Download `ullage-win-x86_64-setup.exe` from the
+[Releases](https://github.com/dualface/ullage-win/releases) page and run it. No
 administrator rights are needed. Windows SmartScreen may warn, because the
 installer is not signed.
 

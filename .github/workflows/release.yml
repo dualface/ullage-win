@@ -7,6 +7,10 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      # Creating the GitHub Release and uploading its files needs write access
+      # to the repository contents.
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Get the version from the tag
@@ -63,3 +67,24 @@ jobs:
           name: ullage-win-${{ steps.version.outputs.version }}
           path: dist/*
           if-no-files-found: error
+      - name: Publish the GitHub Release
+        shell: pwsh
+        # The tag name and the version reach the script through the
+        # environment, never as expanded source.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $files = @(Get-ChildItem -File dist | ForEach-Object { $_.FullName })
+          gh release view $env:TAG_NAME *> $null
+          if ($LASTEXITCODE -eq 0) {
+            # A re-run of the same tag replaces the files of the existing release.
+            gh release upload $env:TAG_NAME @files --clobber
+          } else {
+            $flags = @()
+            if ($env:APP_VERSION -cmatch '^[^+]*-') { $flags += '--prerelease' }
+            gh release create $env:TAG_NAME @files --verify-tag --generate-notes --title "ullage-win $env:APP_VERSION" @flags
+          }
+          if ($LASTEXITCODE -ne 0) { throw "gh release failed with exit code $LASTEXITCODE" }
