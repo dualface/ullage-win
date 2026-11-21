@@ -400,8 +400,8 @@ fn shoot(dialog: HWND, name: &str) {
         ) -> windows::core::BOOL;
     }
     const WM_PRINT: u32 = 0x0317;
-    // PRF_CHECKVISIBLE | PRF_NONCLIENT | PRF_CLIENT | PRF_ERASEBKGND | PRF_CHILDREN
-    const PRINT_ALL: usize = 0x1 | 0x2 | 0x4 | 0x8 | 0x10;
+    // PRF_NONCLIENT | PRF_CLIENT | PRF_ERASEBKGND | PRF_CHILDREN
+    const PRINT_ALL: usize = 0x2 | 0x4 | 0x8 | 0x10;
     let Ok(folder) = std::env::var("ULLAGE_DIALOG_SHOTS") else {
         return;
     };
