@@ -3,7 +3,7 @@
 
 use ullage_cli::usage_view::{UsageCard, UsageRow};
 
-use super::cards::{ContentPad, reading_width};
+use super::cards::ContentPad;
 use super::{Align, Content, FontKind, Measure, Rect, Shape, font, text, text_box_width};
 use crate::compact::{labels, lowest_row, reset_text};
 use crate::display::{BAR_CELLS, Bar, ReadingText, bar, reading_text};
@@ -21,14 +21,14 @@ pub(super) const CONTENT_PAD: ContentPad = ContentPad {
 const ROW_HEIGHT: f32 = 28.0;
 const ROW_PAD: f32 = 8.0;
 const COLUMN_GAP: f32 = 8.0;
-const MIN_READING_WIDTH: f32 = 36.0;
 const BAR_WIDTH: f32 = 49.0;
 const CELL: (f32, f32) = (4.0, 8.0);
 const CELL_GAP: f32 = 1.0;
 /// A row name never takes more than this, so the account keeps its room.
 const MAX_NAME_WIDTH: f32 = 90.0;
-/// The room the label always keeps, enough for `claude-2` at the default
-/// text size: the name gives way first, then the reading.
+/// The most room a label keeps for itself before the name and the reading
+/// take theirs: enough for `claude-2` at the default text size. A shorter
+/// label keeps its own width.
 const MIN_LABEL_WIDTH: f32 = 60.0;
 /// What follows the name of a metric that is switched off.
 const OFF_MARKER: &str = " off";
@@ -64,7 +64,7 @@ pub(super) fn build(
             }
         })
         .collect();
-    let mut readings: Vec<ReadingText> = lines
+    let readings: Vec<ReadingText> = lines
         .iter()
         .map(|line| match line.row {
             Some(row) => reading_text(&row.reading, row.severity),
@@ -88,8 +88,12 @@ pub(super) fn build(
     let right = inner_width - PAD_SIDE - ROW_PAD;
     let name_font = font(FontKind::Mono, 11.0 * scale, 400);
     let label_font = font(FontKind::Mono, 12.0 * scale, 700);
+    // A name with less room than this is left out rather than shown as a
+    // bare ellipsis.
+    let min_name_w = text_box_width(measure, "mm", name_font);
 
-    // Columns from the right: bar, reset, reading, name, then the label.
+    // Shared columns from the right: bar, reset, then the right edge of the
+    // readings. Each line lays out its own reading, name and label.
     let bar_x = right - BAR_WIDTH;
     let reset_right = bar_x - COLUMN_GAP;
     let reading_right = if reset_col > 0.0 {
@@ -97,29 +101,6 @@ pub(super) fn build(
     } else {
         reset_right
     };
-    // The leftmost point the name and the reading may reach, so the label
-    // keeps its room.
-    let label_floor = left + MIN_LABEL_WIDTH + COLUMN_GAP;
-    let room = (reading_right - label_floor).max(0.0);
-    let column = |readings: &[ReadingText]| {
-        readings
-            .iter()
-            .map(|reading| reading_width(reading, value_font, prefix_font, measure))
-            .fold(MIN_READING_WIDTH, f32::max)
-    };
-    // When the readings do not fit with their prefixes, every line leaves
-    // its prefix out, and a value still too wide is cut back.
-    let mut reading_col = column(&readings);
-    if reading_col > room {
-        for reading in &mut readings {
-            reading.prefix = None;
-        }
-        reading_col = column(&readings).min(room);
-    }
-    let name_right = reading_right - reading_col - COLUMN_GAP;
-    // A name with less room than this is left out rather than shown as a
-    // bare ellipsis.
-    let min_name_w = text_box_width(measure, "mm", name_font);
 
     for (index, (line, reading)) in lines.iter().zip(&readings).enumerate() {
         let y = index as f32 * row_height;
@@ -132,41 +113,70 @@ pub(super) fn build(
 
         let name = line.row.map(|row| row.name.as_str()).unwrap_or("");
         let off = line.row.is_some_and(|row| row.off);
-        // The `off` marker follows the name, in the same faint colour as the
-        // name, and is cut last.
         let off_w = if off {
             text_box_width(measure, OFF_MARKER, name_font)
         } else {
             0.0
         };
-        let name_w = if name.is_empty() {
-            0.0
-        } else {
-            (text_box_width(measure, name, name_font) + off_w)
-                .min(MAX_NAME_WIDTH)
-                .min((name_right - label_floor).max(0.0))
-        };
-        let name_w = if name_w < min_name_w { 0.0 } else { name_w };
-        let label_right = name_right - name_w - if name_w > 0.0 { COLUMN_GAP } else { 0.0 };
+        let label_full = text_box_width(measure, &line.label, label_font);
+        let prefix = reading.prefix.map(|word| {
+            (
+                word,
+                text_box_width(measure, word, prefix_font) + measure.width(" ", prefix_font),
+            )
+        });
+        let fit = fit_line(LineWants {
+            room: reading_right - left - label_full.min(MIN_LABEL_WIDTH) - COLUMN_GAP,
+            value: text_box_width(measure, &reading.value, value_font),
+            prefix: prefix.map_or(0.0, |(_, width)| width),
+            name: if name.is_empty() {
+                0.0
+            } else {
+                text_box_width(measure, name, name_font) + off_w
+            },
+            off: off_w,
+            min_name: min_name_w,
+        });
 
-        if name_w > 0.0 {
-            let name_box = (name_w - off_w).max(0.0);
+        body.shapes.push(text(
+            Rect::new(reading_right - fit.value, y, fit.value, row_height),
+            reading.value.clone(),
+            value_font,
+            reading.color,
+            Align::Right,
+            fit.value_cut,
+        ));
+        let mut reading_left = reading_right - fit.value;
+        if let Some((word, width)) = prefix.filter(|_| fit.prefix) {
+            let word_w = text_box_width(measure, word, prefix_font);
+            reading_left -= width;
             body.shapes.push(text(
-                Rect::new(name_right - name_w, y, name_box, row_height),
+                Rect::new(reading_left, y, word_w, row_height),
+                word,
+                prefix_font,
+                Role::Faint,
+                Align::Right,
+                false,
+            ));
+        }
+
+        let mut label_right = reading_left - COLUMN_GAP;
+        if fit.name > 0.0 {
+            // The `off` marker follows the name, in the same faint colour,
+            // and is never cut: the name gives way to it.
+            let name_x = label_right - fit.name;
+            let name_box = fit.name - off_w;
+            body.shapes.push(text(
+                Rect::new(name_x, y, name_box, row_height),
                 name,
                 name_font,
                 Role::Faint,
                 Align::Left,
                 true,
             ));
-            if off && name_w > name_box {
+            if off {
                 body.shapes.push(text(
-                    Rect::new(
-                        name_right - name_w + name_box,
-                        y,
-                        name_w - name_box,
-                        row_height,
-                    ),
+                    Rect::new(name_x + name_box, y, off_w, row_height),
                     OFF_MARKER,
                     name_font,
                     Role::Faint,
@@ -174,36 +184,7 @@ pub(super) fn build(
                     false,
                 ));
             }
-        }
-
-        let full_w = text_box_width(measure, &reading.value, value_font);
-        let value_w = full_w.min(reading_col);
-        body.shapes.push(text(
-            Rect::new(reading_right - value_w, y, value_w, row_height),
-            reading.value.clone(),
-            value_font,
-            reading.color,
-            Align::Right,
-            value_w < full_w,
-        ));
-        if let Some(prefix) = reading.prefix {
-            let prefix_w = text_box_width(measure, prefix, prefix_font);
-            let space = measure.width(" ", prefix_font);
-            {
-                body.shapes.push(text(
-                    Rect::new(
-                        reading_right - value_w - space - prefix_w,
-                        y,
-                        prefix_w,
-                        row_height,
-                    ),
-                    prefix,
-                    prefix_font,
-                    Role::Faint,
-                    Align::Right,
-                    false,
-                ));
-            }
+            label_right = name_x - COLUMN_GAP;
         }
 
         if let Some(reset) = &line.reset {
@@ -251,6 +232,60 @@ pub(super) fn build(
     body.height = lines.len() as f32 * row_height + PAD_BOTTOM;
 }
 
+/// What a line would show in full, as widths, and the room it has between
+/// the label's reserved width and the right edge of the readings.
+struct LineWants {
+    room: f32,
+    value: f32,
+    /// The prefix with the space after it; 0 without a prefix.
+    prefix: f32,
+    /// The name with its `off` marker; 0 without a name.
+    name: f32,
+    off: f32,
+    min_name: f32,
+}
+
+/// What a line shows: the width of its name (0 when left out), whether it
+/// keeps its prefix, and the width of its value.
+#[derive(Debug, PartialEq)]
+struct LineFit {
+    name: f32,
+    prefix: bool,
+    value: f32,
+    value_cut: bool,
+}
+
+/// Fits a line into its room. What does not fit gives way in this order:
+/// the name is cut back (its `off` marker is kept whole), then the name is
+/// left out, then the prefix, and last the value is cut back.
+fn fit_line(wants: LineWants) -> LineFit {
+    let room = wants.room.max(0.0);
+    let reading = wants.value + wants.prefix;
+    let name_room = room - reading - COLUMN_GAP;
+    if wants.name > 0.0 && name_room >= wants.min_name + wants.off {
+        return LineFit {
+            name: wants.name.min(MAX_NAME_WIDTH).min(name_room),
+            prefix: true,
+            value: wants.value,
+            value_cut: false,
+        };
+    }
+    if reading <= room {
+        return LineFit {
+            name: 0.0,
+            prefix: true,
+            value: wants.value,
+            value_cut: false,
+        };
+    }
+    LineFit {
+        name: 0.0,
+        prefix: false,
+        value: wants.value.min(room),
+        value_cut: wants.value > room,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ullage_cli::usage_view::{Reading, UsageNotice};
@@ -258,6 +293,7 @@ mod tests {
     use super::super::cards::tests::{card, row, sample_cards};
     use super::super::testing::*;
     use super::super::*;
+    use super::{LineFit, LineWants, fit_line};
     use crate::prefs::Layout;
 
     fn input<'a>(cards: &'a [UsageCard]) -> Input<'a> {
@@ -594,8 +630,11 @@ mod tests {
         }
         text_of(&scene.content, "36h00m");
         assert!(!text_of(&scene.content, "120 of 500").ellipsis);
-        // Without room for both, the prefix gives way.
+        // The wide reading's own line gives up its name and prefix; the
+        // other line keeps its name.
         assert!(!texts(&scene.content).iter().any(|t| t.text == "credits"));
+        assert_eq!(text_of(&scene.content, "weekly").rect.y, 0.0);
+        assert!(!texts(&scene.content).iter().any(|t| t.text == "5h"));
         assert_lines_fit(&scene);
     }
 
@@ -619,5 +658,96 @@ mod tests {
         text_of(&scene.content, "used");
         text_of(&scene.content, "weekly");
         assert_lines_fit(&scene);
+    }
+
+    #[test]
+    fn one_wide_reading_does_not_take_the_prefix_of_another_line() {
+        let mut cards = sample_cards(2);
+        cards[0].rows[1].resets_in = Some(36 * 3600);
+        cards[0].rows[0].reading = Reading::Credits("12 of 50".into());
+        cards[0].rows[0].remaining_ratio = Some(0.05);
+        cards[1].rows[1].reading = Reading::Used("12%".into());
+        let scene = build(&input(&cards), &FakeMeasure);
+        assert!(!texts(&scene.content).iter().any(|t| t.text == "credits"));
+        let used = text_of(&scene.content, "used");
+        assert_eq!(used.rect.y, 28.0);
+        // The readings still share their right edge.
+        assert_eq!(
+            text_of(&scene.content, "12 of 50").rect.right(),
+            text_of(&scene.content, "12%").rect.right()
+        );
+        assert_lines_fit(&scene);
+    }
+
+    #[test]
+    fn a_name_marked_off_shows_the_whole_marker() {
+        let mut off_row = row(
+            "api",
+            Reading::Remaining("12%".into()),
+            Some(0.18),
+            Some(36 * 3600),
+        );
+        off_row.off = true;
+        let cards = vec![card("cursor", None, "account-5", vec![off_row])];
+        let scene = build(&input(&cards), &FakeMeasure);
+        let name = text_of(&scene.content, "api");
+        let off = text_of(&scene.content, " off");
+        // ` off` is four 6.6 DIP characters, rounded up, plus one.
+        assert_eq!(off.rect.w, 28.0);
+        assert_eq!(off.rect.x, name.rect.right());
+        assert_lines_fit(&scene);
+    }
+
+    fn wants(room: f32, value: f32, prefix: f32, name: f32, off: f32) -> LineWants {
+        LineWants {
+            room,
+            value,
+            prefix,
+            name,
+            off,
+            min_name: 15.0,
+        }
+    }
+
+    #[test]
+    fn a_line_with_room_shows_everything() {
+        let fit = fit_line(wants(100.0, 30.0, 20.0, 40.0, 0.0));
+        assert_eq!(
+            fit,
+            LineFit {
+                name: 40.0,
+                prefix: true,
+                value: 30.0,
+                value_cut: false
+            }
+        );
+    }
+
+    #[test]
+    fn the_name_is_cut_back_first_and_keeps_its_off_marker() {
+        // 110 - 50 - 8 leaves 52 for a 68 DIP name with a 28 DIP marker.
+        let fit = fit_line(wants(110.0, 30.0, 20.0, 68.0, 28.0));
+        assert_eq!((fit.name, fit.prefix), (52.0, true));
+        // Less than two characters and the marker: the name is left out
+        // while the prefix stays.
+        let fit = fit_line(wants(90.0, 30.0, 20.0, 68.0, 28.0));
+        assert_eq!((fit.name, fit.prefix, fit.value), (0.0, true, 30.0));
+    }
+
+    #[test]
+    fn the_prefix_goes_before_the_value_is_cut() {
+        let fit = fit_line(wants(40.0, 30.0, 20.0, 40.0, 0.0));
+        assert_eq!(
+            fit,
+            LineFit {
+                name: 0.0,
+                prefix: false,
+                value: 30.0,
+                value_cut: false
+            }
+        );
+        let fit = fit_line(wants(25.0, 30.0, 20.0, 0.0, 0.0));
+        assert_eq!((fit.value, fit.value_cut), (25.0, true));
+        assert_eq!(fit_line(wants(-5.0, 30.0, 0.0, 0.0, 0.0)).value, 0.0);
     }
 }
