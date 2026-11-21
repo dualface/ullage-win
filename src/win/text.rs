@@ -174,3 +174,53 @@ impl Measure for Typography {
         width
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use chrono::Utc;
+    use ullage_cli::usage_view::usage_cards;
+
+    use super::*;
+    use crate::prefs::{DEFAULT_TEXT_SIZE, Layout};
+    use crate::remote::limits::tests::full_reply;
+    use crate::scene::{self, Body, Input};
+
+    // Only a measurement, printed with `--nocapture`: how long the window
+    // thread takes to rebuild the scene of the largest reply a remote daemon
+    // may give (see `remote::limits`). The first build has an empty cache of
+    // widths, which is the case after the window has been idle.
+    // `cargo test --release rebuild_time -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, not a check; run with --ignored --nocapture in a release build"]
+    fn rebuild_time_of_the_largest_reply() {
+        let typography = Typography::new().unwrap();
+        let reply = full_reply();
+        for layout in [Layout::Columns, Layout::Single, Layout::Compact] {
+            for pass in ["cold", "warm"] {
+                let started = Instant::now();
+                let cards = usage_cards(&reply, Utc::now());
+                let cards_done = started.elapsed();
+                let scene = scene::build(
+                    &Input {
+                        layout,
+                        text_size: DEFAULT_TEXT_SIZE,
+                        body: Body::Cards(&cards),
+                        countdown: (1.0, 120),
+                        pinned: false,
+                        hover: None,
+                        max_window_height: 1000.0,
+                    },
+                    &typography,
+                );
+                eprintln!(
+                    "{layout:?} {pass}: usage_cards {:?}, scene::build {:?} (content height {})",
+                    cards_done,
+                    started.elapsed() - cards_done,
+                    scene.max_scroll()
+                );
+            }
+        }
+    }
+}

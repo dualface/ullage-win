@@ -6,6 +6,7 @@ use ullage_cli::usage_view::{FetchError, UsageFetch, fetch_usage};
 use super::address::RemoteAddress;
 use super::client::{FETCH_TIMEOUT, HttpClient};
 use super::http::Deadline;
+use super::limits::within_limits;
 use super::resolve::{Resolver, SystemResolver};
 use super::store::{TokenStore, credential_for};
 use crate::state::FailureKind;
@@ -15,7 +16,8 @@ use crate::state::FailureKind;
 /// is "not paired" when the check is done in time, and nothing is sent. When
 /// the check is done only after the deadline, the result is the timeout
 /// instead, again with nothing sent, so that a slow credential store does not
-/// clear what the window shows.
+/// clear what the window shows. A reply that `fetch_usage` accepts but that
+/// is over the limits of [`super::limits`] is an invalid one.
 pub fn fetch_remote(
     store: &dyn TokenStore,
     address: &RemoteAddress,
@@ -50,19 +52,30 @@ fn fetch_remote_in(
         Some(credential) => {
             let client =
                 HttpClient::with_resolver(address.clone(), credential.token, deadline, resolver);
-            fetch_usage(&client).map_err(|error| {
-                // `ClientError` has no word for a refused token, or for an
-                // address that may not receive it: the client noted them.
-                if error == FetchError::InvalidResponse && client.was_rejected() {
-                    FailureKind::TokenRejected
-                } else if let (FetchError::InvalidResponse, Some(ip)) =
-                    (&error, client.refused_address())
-                {
-                    FailureKind::AddressRefused(ip)
-                } else {
-                    FailureKind::Fetch(error)
-                }
-            })
+            fetch_usage(&client)
+                .map_err(|error| {
+                    // `ClientError` has no word for a refused token, or for
+                    // an address that may not receive it: the client noted
+                    // them.
+                    if error == FetchError::InvalidResponse && client.was_rejected() {
+                        FailureKind::TokenRejected
+                    } else if let (FetchError::InvalidResponse, Some(ip)) =
+                        (&error, client.refused_address())
+                    {
+                        FailureKind::AddressRefused(ip)
+                    } else {
+                        FailureKind::Fetch(error)
+                    }
+                })
+                // A reply over the limits is an invalid one, and is judged
+                // below with the deadline like any other.
+                .and_then(|fetch| {
+                    if within_limits(&fetch.snapshots) {
+                        Ok(fetch)
+                    } else {
+                        Err(FailureKind::Fetch(FetchError::InvalidResponse))
+                    }
+                })
         }
     };
     deadline.judge(result, FailureKind::Fetch(FetchError::DaemonUnavailable))
@@ -73,12 +86,17 @@ mod tests {
     use std::time::Duration;
 
     use serde_json::json;
-    use ullage_protocol::{CONTROL_PROTOCOL_VERSION, ControlError, ControlResult};
+    use ullage_protocol::{CONTROL_PROTOCOL_VERSION, ControlError, ControlResult, SnapshotPayload};
 
+    use super::super::limits::{
+        MAX_STRING_BYTES,
+        tests::{other, reading, snapshot, usage_mut, window},
+    };
     use super::super::resolve::{ResolveError, fake::Fake};
     use super::super::store::{Credential, Token, memory::MemoryStore};
     use super::super::testserver::{Reply, ok, reply, serve};
     use super::*;
+    use crate::state::failure_for_kind;
 
     fn store_for(address: RemoteAddress) -> MemoryStore {
         MemoryStore::with(Credential {
@@ -94,6 +112,27 @@ mod tests {
         map.insert("version".into(), json!(CONTROL_PROTOCOL_VERSION));
         map.insert("request_id".into(), json!("http-1"));
         serde_json::to_vec(&document).unwrap()
+    }
+
+    /// What a daemon gives, and what is over the limits: a label too long.
+    fn normal_snapshots() -> Vec<SnapshotPayload> {
+        let mut one = snapshot("a1", vec![window(other("w", "W"), vec![reading("usage")])]);
+        usage_mut(&mut one).windows[0].measurements[0].used = 42.5;
+        vec![one, snapshot("a2", Vec::new())]
+    }
+
+    /// Every text of the daemon's reply that the window must never show is
+    /// `marker`, and the number is one that nothing else in a failure has.
+    const MARKER: &str = "LEAK-MARKER-7f3a";
+    const NUMBER: f64 = 987_654.25;
+
+    fn oversized_snapshots() -> Vec<SnapshotPayload> {
+        let label = MARKER.repeat(MAX_STRING_BYTES / MARKER.len() + 1);
+        let mut measurement = reading(MARKER);
+        measurement.used = NUMBER;
+        let mut one = snapshot("a1", vec![window(other(MARKER, &label), vec![measurement])]);
+        usage_mut(&mut one).account_label = Some(MARKER.into());
+        vec![one]
     }
 
     fn named(server: &super::super::testserver::Server) -> RemoteAddress {
@@ -323,5 +362,51 @@ mod tests {
             panic!("{failure:?}");
         };
         assert_eq!(supported_version, CONTROL_PROTOCOL_VERSION - 1);
+    }
+
+    #[test]
+    fn a_reply_over_the_limits_is_an_invalid_one_and_one_within_them_is_unchanged() {
+        let server = serve(vec![Reply::Raw(ok(&body(ControlResult::Snapshots(
+            oversized_snapshots(),
+        ))))]);
+        assert_eq!(
+            fetch_remote(&store_for(server.address.clone()), &server.address).unwrap_err(),
+            FailureKind::Fetch(FetchError::InvalidResponse)
+        );
+
+        let normal = normal_snapshots();
+        let server = serve(vec![Reply::Raw(ok(&body(ControlResult::Snapshots(
+            normal.clone(),
+        ))))]);
+        let fetched = fetch_remote(&store_for(server.address.clone()), &server.address).unwrap();
+        assert_eq!(fetched.snapshots, normal);
+    }
+
+    #[test]
+    fn what_the_window_says_of_a_reply_over_the_limits_has_nothing_of_the_reply() {
+        let server = serve(vec![Reply::Raw(ok(&body(ControlResult::Snapshots(
+            oversized_snapshots(),
+        ))))]);
+        // Make sure that the reply carries what must not be shown.
+        let sent =
+            String::from_utf8(body(ControlResult::Snapshots(oversized_snapshots()))).unwrap();
+        assert!(sent.contains(MARKER) && sent.contains("987654.25"));
+
+        let kind = fetch_remote(&store_for(server.address.clone()), &server.address).unwrap_err();
+        let failure = failure_for_kind(&kind, Some(&server.address));
+        assert_eq!(
+            failure,
+            failure_for_kind(
+                &FailureKind::Fetch(FetchError::InvalidResponse),
+                Some(&server.address)
+            )
+        );
+        for text in [&failure.title, &failure.body, failure.command] {
+            assert!(!text.contains(MARKER) && !text.contains("987654"), "{text}");
+        }
+        let error = FetchError::InvalidResponse;
+        for text in [error.to_string(), format!("{error:?}")] {
+            assert!(!text.contains(MARKER), "{text}");
+        }
     }
 }

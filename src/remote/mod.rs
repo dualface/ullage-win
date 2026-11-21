@@ -6,6 +6,7 @@ pub mod address;
 pub mod client;
 pub mod fetch;
 pub mod http;
+pub mod limits;
 pub mod pairing;
 pub mod resolve;
 pub mod store;
