@@ -1,5 +1,7 @@
 //! What each account shows on the compact strip.
 
+use std::collections::HashMap;
+
 use ullage_cli::usage_view::{UsageCard, UsageRow};
 
 const SECONDS_PER_MINUTE: i64 = 60;
@@ -29,24 +31,20 @@ pub fn lowest_row(card: &UsageCard) -> Option<&UsageRow> {
 /// provider alone when it has one account, otherwise `provider-1`,
 /// `provider-2`, ... in the order the accounts come.
 pub fn labels(cards: &[UsageCard]) -> Vec<String> {
-    let total = |provider: &str| {
-        cards
-            .iter()
-            .filter(|card| card.title.provider == provider)
-            .count()
-    };
+    let mut totals: HashMap<&str, usize> = HashMap::new();
+    for card in cards {
+        *totals.entry(card.title.provider.as_str()).or_default() += 1;
+    }
+    let mut seen: HashMap<&str, usize> = HashMap::new();
     cards
         .iter()
-        .enumerate()
-        .map(|(index, card)| {
-            let provider = &card.title.provider;
-            if total(provider) == 1 {
-                return provider.clone();
+        .map(|card| {
+            let provider = card.title.provider.as_str();
+            if totals[provider] == 1 {
+                return provider.to_owned();
             }
-            let number = cards[..=index]
-                .iter()
-                .filter(|earlier| earlier.title.provider == *provider)
-                .count();
+            let number = seen.entry(provider).or_default();
+            *number += 1;
             format!("{provider}-{number}")
         })
         .collect()

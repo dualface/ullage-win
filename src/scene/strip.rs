@@ -27,6 +27,9 @@ const CELL: (f32, f32) = (4.0, 8.0);
 const CELL_GAP: f32 = 1.0;
 /// A row name never takes more than this, so the account keeps its room.
 const MAX_NAME_WIDTH: f32 = 90.0;
+/// The room the label always keeps, enough for `claude-2` at the default
+/// text size: the name gives way first, then the reading.
+const MIN_LABEL_WIDTH: f32 = 60.0;
 /// What follows the name of a metric that is switched off.
 const OFF_MARKER: &str = " off";
 
@@ -61,7 +64,7 @@ pub(super) fn build(
             }
         })
         .collect();
-    let readings: Vec<ReadingText> = lines
+    let mut readings: Vec<ReadingText> = lines
         .iter()
         .map(|line| match line.row {
             Some(row) => reading_text(&row.reading, row.severity),
@@ -72,10 +75,6 @@ pub(super) fn build(
             },
         })
         .collect();
-    let reading_col = readings
-        .iter()
-        .map(|reading| reading_width(reading, value_font, prefix_font, measure))
-        .fold(MIN_READING_WIDTH, f32::max);
     // The reset column is as wide as its longest text, and takes no room
     // when no line has a reset.
     let reset_col = lines
@@ -90,6 +89,38 @@ pub(super) fn build(
     let name_font = font(FontKind::Mono, 11.0 * scale, 400);
     let label_font = font(FontKind::Mono, 12.0 * scale, 700);
 
+    // Columns from the right: bar, reset, reading, name, then the label.
+    let bar_x = right - BAR_WIDTH;
+    let reset_right = bar_x - COLUMN_GAP;
+    let reading_right = if reset_col > 0.0 {
+        reset_right - reset_col - COLUMN_GAP
+    } else {
+        reset_right
+    };
+    // The leftmost point the name and the reading may reach, so the label
+    // keeps its room.
+    let label_floor = left + MIN_LABEL_WIDTH + COLUMN_GAP;
+    let room = (reading_right - label_floor).max(0.0);
+    let column = |readings: &[ReadingText]| {
+        readings
+            .iter()
+            .map(|reading| reading_width(reading, value_font, prefix_font, measure))
+            .fold(MIN_READING_WIDTH, f32::max)
+    };
+    // When the readings do not fit with their prefixes, every line leaves
+    // its prefix out, and a value still too wide is cut back.
+    let mut reading_col = column(&readings);
+    if reading_col > room {
+        for reading in &mut readings {
+            reading.prefix = None;
+        }
+        reading_col = column(&readings).min(room);
+    }
+    let name_right = reading_right - reading_col - COLUMN_GAP;
+    // A name with less room than this is left out rather than shown as a
+    // bare ellipsis.
+    let min_name_w = text_box_width(measure, "mm", name_font);
+
     for (index, (line, reading)) in lines.iter().zip(&readings).enumerate() {
         let y = index as f32 * row_height;
         body.shapes.push(Shape::Rect {
@@ -99,14 +130,6 @@ pub(super) fn build(
             border: None,
         });
 
-        // Columns from the right: bar, reset, reading, name, then the label.
-        let bar_x = right - BAR_WIDTH;
-        let reset_right = bar_x - COLUMN_GAP;
-        let reading_right = if reset_col > 0.0 {
-            reset_right - reset_col - COLUMN_GAP
-        } else {
-            reset_right
-        };
         let name = line.row.map(|row| row.name.as_str()).unwrap_or("");
         let off = line.row.is_some_and(|row| row.off);
         // The `off` marker follows the name, in the same faint colour as the
@@ -119,9 +142,11 @@ pub(super) fn build(
         let name_w = if name.is_empty() {
             0.0
         } else {
-            (text_box_width(measure, name, name_font) + off_w).min(MAX_NAME_WIDTH)
+            (text_box_width(measure, name, name_font) + off_w)
+                .min(MAX_NAME_WIDTH)
+                .min((name_right - label_floor).max(0.0))
         };
-        let name_right = reading_right - reading_col - COLUMN_GAP;
+        let name_w = if name_w < min_name_w { 0.0 } else { name_w };
         let label_right = name_right - name_w - if name_w > 0.0 { COLUMN_GAP } else { 0.0 };
 
         if name_w > 0.0 {
@@ -151,31 +176,34 @@ pub(super) fn build(
             }
         }
 
-        let value_w = text_box_width(measure, &reading.value, value_font);
+        let full_w = text_box_width(measure, &reading.value, value_font);
+        let value_w = full_w.min(reading_col);
         body.shapes.push(text(
             Rect::new(reading_right - value_w, y, value_w, row_height),
             reading.value.clone(),
             value_font,
             reading.color,
             Align::Right,
-            false,
+            value_w < full_w,
         ));
         if let Some(prefix) = reading.prefix {
             let prefix_w = text_box_width(measure, prefix, prefix_font);
             let space = measure.width(" ", prefix_font);
-            body.shapes.push(text(
-                Rect::new(
-                    reading_right - value_w - space - prefix_w,
-                    y,
-                    prefix_w,
-                    row_height,
-                ),
-                prefix,
-                prefix_font,
-                Role::Faint,
-                Align::Right,
-                false,
-            ));
+            {
+                body.shapes.push(text(
+                    Rect::new(
+                        reading_right - value_w - space - prefix_w,
+                        y,
+                        prefix_w,
+                        row_height,
+                    ),
+                    prefix,
+                    prefix_font,
+                    Role::Faint,
+                    Align::Right,
+                    false,
+                ));
+            }
         }
 
         if let Some(reset) = &line.reset {
@@ -485,7 +513,17 @@ mod tests {
             "codex",
             None,
             "account-9",
-            vec![row("5h", Reading::Remaining("50%".into()), Some(0.5), None)],
+            // The selected row has no reset; the other row's reset is not
+            // borrowed.
+            vec![
+                row("5h", Reading::Remaining("50%".into()), Some(0.5), None),
+                row(
+                    "weekly",
+                    Reading::Remaining("90%".into()),
+                    Some(0.9),
+                    Some(3600),
+                ),
+            ],
         ));
         cards.push(card("grok", None, "account-4", Vec::new()));
         let scene = build(&input(&cards), &FakeMeasure);
@@ -513,5 +551,73 @@ mod tests {
         let scene = build(&input(&cards), &FakeMeasure);
         let reading = text_of(&scene.content, "50%");
         assert_eq!(reading.rect.right(), 290.0 - 2.0 - 4.0 - 8.0 - 49.0 - 8.0);
+    }
+
+    /// Fails when two texts of one line overlap or a text leaves the strip.
+    fn assert_lines_fit(scene: &Scene) {
+        let inner = 290.0 - 2.0;
+        let mut shown: Vec<&Text> = texts(&scene.content);
+        shown.sort_by(|a, b| {
+            (a.rect.y, a.rect.x)
+                .partial_cmp(&(b.rect.y, b.rect.x))
+                .unwrap()
+        });
+        for pair in shown.windows(2) {
+            if pair[0].rect.y == pair[1].rect.y {
+                assert!(
+                    pair[0].rect.right() <= pair[1].rect.x,
+                    "{:?} overlaps {:?}",
+                    pair[0].text,
+                    pair[1].text
+                );
+            }
+        }
+        for text in shown {
+            assert!(
+                text.rect.x >= 0.0 && text.rect.right() <= inner,
+                "{:?}",
+                text.text
+            );
+        }
+    }
+
+    #[test]
+    fn a_wide_reading_and_a_reset_leave_the_label_its_room() {
+        let mut cards = sample_cards(2);
+        cards[0].rows[1].resets_in = Some(36 * 3600);
+        cards[1].rows[0].reading = Reading::Credits("120 of 500".into());
+        cards[1].rows[0].remaining_ratio = Some(0.05);
+        let scene = build(&input(&cards), &FakeMeasure);
+        for label in ["claude-1", "claude-2"] {
+            // Eight 7.2 DIP characters, rounded up, plus one: not cut back.
+            assert_eq!(text_of(&scene.content, label).rect.w, 59.0);
+        }
+        text_of(&scene.content, "36h00m");
+        assert!(!text_of(&scene.content, "120 of 500").ellipsis);
+        // Without room for both, the prefix gives way.
+        assert!(!texts(&scene.content).iter().any(|t| t.text == "credits"));
+        assert_lines_fit(&scene);
+    }
+
+    #[test]
+    fn a_value_wider_than_its_room_is_cut_back_with_an_ellipsis() {
+        let mut cards = sample_cards(1);
+        cards[0].rows[0].reading = Reading::Credits("123456789 of 999999999".into());
+        cards[0].rows[0].remaining_ratio = Some(0.05);
+        let scene = build(&input(&cards), &FakeMeasure);
+        assert!(text_of(&scene.content, "123456789 of 999999999").ellipsis);
+        // The label is not cut back: 6 × 7.2 DIPs, rounded up, plus one.
+        assert_eq!(text_of(&scene.content, "claude").rect.w, 45.0);
+        assert_lines_fit(&scene);
+    }
+
+    #[test]
+    fn readings_that_fit_keep_their_prefix_and_names() {
+        let mut cards = sample_cards(1);
+        cards[0].rows[1].reading = Reading::Used("12%".into());
+        let scene = build(&input(&cards), &FakeMeasure);
+        text_of(&scene.content, "used");
+        text_of(&scene.content, "weekly");
+        assert_lines_fit(&scene);
     }
 }
