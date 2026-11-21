@@ -678,7 +678,11 @@ mod tests {
     fn the_layout_scales_with_the_dpi() {
         let frame = frame_of("center:1", Focus::None);
         for rect in [
+            frame.address_label,
             frame.address_box,
+            frame.address_edit,
+            frame.code_label,
+            frame.code_box,
             frame.code_edit,
             frame.primary,
             frame.cancel,
@@ -701,6 +705,24 @@ mod tests {
             to_pixels(Rect::new(10.0, 20.0, 30.0, 40.0), 96),
             (10, 20, 30, 40)
         );
+    }
+
+    #[test]
+    fn no_two_pieces_of_text_overlap() {
+        for address in ["", "center:7878", "8.8.8.8:80"] {
+            let frame = frame_of(address, Focus::None);
+            let all = texts(&frame.shapes);
+            for (index, a) in all.iter().enumerate() {
+                for b in &all[index + 1..] {
+                    let (a, b) = (a.rect, b.rect);
+                    let apart = a.right() <= b.x
+                        || b.right() <= a.x
+                        || a.bottom() <= b.y
+                        || b.bottom() <= a.y;
+                    assert!(apart, "{address}: {a:?} and {b:?}");
+                }
+            }
+        }
     }
 
     fn button(kind: Kind, state: ButtonState) -> Vec<Shape> {

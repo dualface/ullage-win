@@ -6,27 +6,22 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use windows::Win32::Foundation::{COLORREF, RECT};
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
-};
+use windows::Win32::Foundation::COLORREF;
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE, D2D1CreateFactory,
-    ID2D1Factory,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory, ID2D1Factory,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET,
-    DeleteObject, HBRUSH, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, SRCCOPY,
+    DeleteObject, GetObjectType, HBRUSH, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, SRCCOPY,
 };
 use windows::core::{Interface, Result};
 
-use super::gfx::Painter;
+use super::gfx::{Painter, make_target};
 use super::surface::Surface;
 use super::text::Typography;
 use crate::scene::pair::{
-    ButtonState, CODE_FONT, EDIT_FONT, Focus, Kind, LABEL_FONT, Model, button_shapes, frame,
+    ButtonState, CODE_FONT, EDIT_FONT, Focus, Kind, LABEL_FONT, Model, Status, button_shapes,
+    frame, status,
 };
 use crate::scene::{Font, Rect, Shape};
 use crate::theme::{Color, Mode, Role};
@@ -36,6 +31,13 @@ use crate::theme::{Color, Mode, Role};
 pub fn colorref(mode: Mode, role: Role) -> COLORREF {
     let Color { r, g, b, .. } = mode.color(role);
     COLORREF(u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16))
+}
+
+/// Whether `hdc` is a device context: a handle of another kind of GDI object
+/// (a brush, a bitmap) or a number that is no handle is not one.
+pub fn is_dc(hdc: HDC) -> bool {
+    // `OBJ_DC` and `OBJ_MEMDC`.
+    matches!(unsafe { GetObjectType(HGDIOBJ(hdc.0)) }, 3 | 10)
 }
 
 /// A font of `font`'s size in DIPs, for a window at `dpi`.
@@ -64,7 +66,7 @@ fn make_font(typography: &Typography, font: Font, dpi: u32) -> HFONT {
 
 /// The GDI objects of the dialog at one DPI and one mode. They are deleted
 /// when it is dropped.
-struct Gdi {
+pub struct Gdi {
     edit: HFONT,
     code: HFONT,
     label: HFONT,
@@ -112,8 +114,9 @@ pub struct Ui {
     pub hover: Cell<Option<Kind>>,
     /// Whether a `WM_MOUSELEAVE` is asked for.
     pub tracking: Cell<bool>,
-    /// The size of the client area in DIPs that the controls are placed for.
-    pub size: Cell<(f32, f32)>,
+    /// The address for which the plain text note has been drawn, so that it
+    /// has been on the screen before that address can be paired with.
+    pub noted: RefCell<Option<String>>,
 }
 
 impl Ui {
@@ -131,7 +134,7 @@ impl Ui {
             focus: Cell::new(Focus::None),
             hover: Cell::new(None),
             tracking: Cell::new(false),
-            size: Cell::new((0.0, 0.0)),
+            noted: RefCell::new(None),
         })
     }
 
@@ -148,10 +151,17 @@ impl Ui {
     }
 
     /// Changes the DPI or the mode, and makes the fonts and brushes again.
-    pub fn restyle(&self, mode: Mode, dpi: u32) {
+    /// The old ones are given back, not deleted: the controls still hold the
+    /// old fonts until they are given the new ones, and the caller lets go of
+    /// the old ones after that.
+    #[must_use = "the old fonts are deleted when this is dropped, after the controls have new ones"]
+    pub fn restyle(&self, mode: Mode, dpi: u32) -> Gdi {
         self.mode.set(mode);
         self.dpi.set(dpi);
-        *self.gdi.borrow_mut() = Gdi::new(&self.typography, dpi, mode);
+        std::mem::replace(
+            &mut *self.gdi.borrow_mut(),
+            Gdi::new(&self.typography, dpi, mode),
+        )
     }
 
     pub fn edit_font(&self) -> HFONT {
@@ -178,29 +188,8 @@ impl Ui {
     /// bitmap in memory, so that nothing flickers.
     pub fn draw(&self, hdc: HDC, size: (i32, i32), shapes: &[Shape]) -> Result<()> {
         let surface = Surface::new(size.0, size.1)?;
-        let dpi = self.dpi.get() as f32;
-        let properties = D2D1_RENDER_TARGET_PROPERTIES {
-            r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: dpi,
-            dpiY: dpi,
-            usage: D2D1_RENDER_TARGET_USAGE_NONE,
-            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-        };
         unsafe {
-            let target = self.factory.CreateDCRenderTarget(&properties)?;
-            target.BindDC(
-                surface.hdc,
-                &RECT {
-                    left: 0,
-                    top: 0,
-                    right: size.0,
-                    bottom: size.1,
-                },
-            )?;
+            let target = make_target(&self.factory, &surface, self.dpi.get())?;
             let mut painter = Painter::new(&self.factory, target.cast()?, self.typography.clone())?;
             painter.set_mode(self.mode.get());
             painter.begin();
@@ -227,7 +216,12 @@ impl Ui {
             border: None,
         }];
         shapes.extend(frame.shapes);
-        self.draw(hdc, size, &shapes)
+        self.draw(hdc, size, &shapes)?;
+        // The note is on the screen now: that address may be paired with.
+        if status(address) == Status::Plaintext {
+            *self.noted.borrow_mut() = Some(address.to_owned());
+        }
+        Ok(())
     }
 
     /// A button of `kind`, `size` pixels, on `hdc`.

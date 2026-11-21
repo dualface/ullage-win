@@ -18,9 +18,9 @@ use std::rc::Rc;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, GetMonitorInfoW, GetObjectType, HDC, HGDIOBJ, InvalidateRect,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT, RDW_ALLCHILDREN,
-    RDW_INVALIDATE, RedrawWindow, SetBkColor, SetTextColor,
+    BeginPaint, EndPaint, GetMonitorInfoW, HDC, InvalidateRect, MONITOR_DEFAULTTONEAREST,
+    MONITORINFO, MonitorFromWindow, PAINTSTRUCT, RDW_ALLCHILDREN, RDW_INVALIDATE, RedrawWindow,
+    SetBkColor, SetTextColor,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
@@ -36,7 +36,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_CLOSE, WM_COMMAND, WM_INITDIALOG,
 };
 
-use super::pair_paint::{Ui, colorref};
+use super::pair_paint::{Ui, colorref, is_dc};
 use super::registry;
 use super::util::{hiword, loword, pcwstr, wide};
 use crate::pair_form::{
@@ -46,7 +46,7 @@ use crate::pair_form::{
 use crate::remote::pairing::{can_submit, format_pair_code_input};
 use crate::scene::Rect;
 use crate::scene::pair::{
-    ButtonState, Focus, Kind, Model, frame, primary_label, status, to_pixels,
+    ButtonState, Focus, Kind, Model, Status, frame, primary_label, status, to_pixels,
 };
 use crate::theme::{Mode, Role};
 
@@ -315,9 +315,15 @@ unsafe extern "system" fn dialog_proc(
             if let Some(shared) = shared_of(hwnd)
                 && let Some(ui) = ui_of(&shared)
             {
-                ui.restyle(ui.mode(), u32::from(loword(wparam.0 as isize) as u16));
-                dress_controls(hwnd, &ui);
-                layout(hwnd, &ui);
+                // Not the DPI of the message, which can be anything: the one
+                // that the window has. A DPI that is 0 is no DPI.
+                let dpi = unsafe { GetDpiForWindow(hwnd) };
+                if dpi != 0 && dpi != ui.dpi() {
+                    let old = ui.restyle(ui.mode(), dpi);
+                    dress_controls(hwnd, &ui);
+                    drop(old);
+                    layout(hwnd, &ui);
+                }
             }
             1
         }
@@ -514,7 +520,7 @@ fn paint_button(hwnd: HWND, ui: Option<&Ui>, on: Option<HDC>) {
         None => unsafe { BeginPaint(hwnd, &mut paint) },
     };
     if let (Some(ui), Some(kind)) = (ui, kind_of(hwnd))
-        && unsafe { GetObjectType(HGDIOBJ(hdc.0)) } != 0
+        && is_dc(hdc)
     {
         let flags = unsafe { SendMessageW(hwnd, BM_GETSTATE, None, None) }.0;
         // A dialog hides the focus ring until the keyboard is used.
@@ -546,7 +552,7 @@ fn paint_dialog(hwnd: HWND, on: Option<HDC>) {
     // No borrow is held while drawing: the state is cloned out first.
     if let Some(shared) = shared_of(hwnd)
         && let Some(ui) = ui_of(&shared)
-        && unsafe { GetObjectType(HGDIOBJ(hdc.0)) } != 0
+        && is_dc(hdc)
     {
         let _ = ui.draw_dialog(hdc, client_pixels(hwnd), &text_of(hwnd, ID_ADDRESS));
     }
@@ -610,9 +616,10 @@ fn restyle_for_system(hwnd: HWND, shared: &Shared) {
     if mode == ui.mode() {
         return;
     }
-    ui.restyle(mode, ui.dpi());
+    let old = ui.restyle(mode, ui.dpi());
     dark_title_bar(hwnd, mode);
     dress_controls(hwnd, &ui);
+    drop(old);
     unsafe {
         let _ = RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_ALLCHILDREN);
     }
@@ -704,8 +711,9 @@ fn initialize(hwnd: HWND, shared: &Rc<Shared>) -> Result<(), Failed> {
     // On another screen, the DPI can be another.
     let own = dpi_of(hwnd);
     if own != ui.dpi() {
-        ui.restyle(mode, own);
+        let old = ui.restyle(mode, own);
         dress_controls(hwnd, &ui);
+        drop(old);
         layout(hwnd, &ui);
     }
     unsafe {
@@ -793,7 +801,6 @@ fn layout(hwnd: HWND, ui: &Ui) {
             }
         }
     }
-    ui.size.set(frame.size);
     invalidate(hwnd);
 }
 
@@ -887,6 +894,16 @@ fn accept(hwnd: HWND, shared: &Shared) {
     // The main button is disabled until the input is good, but Enter can
     // still reach here: the check is made again.
     if !can_submit(&address, &code) {
+        return;
+    }
+    // A path that is not encrypted is paired with only after its note has been
+    // on the screen: an Enter that was queued before the note was drawn is not
+    // the user's word. The dialog is drawn again, and the next press counts.
+    if let Some(ui) = ui_of(shared)
+        && status(&address) == Status::Plaintext
+        && ui.noted.borrow().as_deref() != Some(address.as_str())
+    {
+        invalidate(hwnd);
         return;
     }
     *shared.entry.borrow_mut() = Some(Entry { address, code });

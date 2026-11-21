@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Graphics::Gdi::SetTextColor;
 use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
-use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
+use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, IsWindow, PostMessageW};
 use windows::core::PCWSTR;
 
 use super::*;
@@ -259,6 +259,21 @@ fn focus(dialog: HWND, id: u16) {
     }
 }
 
+/// Waits until the dialog is gone, and fails when it is not: a key that was
+/// meant to close it did not, and what closes it after the script is the
+/// cleanup, which must not be taken for the key.
+fn wait_closed(dialog: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+    let started = Instant::now();
+    while unsafe { IsWindow(Some(dialog)) }.as_bool() {
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the key did not close the dialog"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// Presses Enter: the key goes through the message loop of the dialog, which
 /// gives it to the button that has the focus, or else to the default button.
 fn press_enter(dialog: HWND) {
@@ -275,6 +290,7 @@ fn enter_in_a_box_pairs() {
         set_text(dialog, ID_CODE, "abcdef");
         focus(dialog, ID_CODE);
         press_enter(dialog);
+        wait_closed(dialog);
     });
     let shown = run(HWND::default(), Some("100.71.140.68:7878"));
     driver.join().unwrap();
@@ -294,6 +310,7 @@ fn escape_cancels_and_does_not_pair() {
         unsafe {
             PostMessageW(Some(dialog), WM_KEYDOWN, WPARAM(VK_ESCAPE), LPARAM(0)).unwrap();
         }
+        wait_closed(dialog);
     });
     let shown = run(HWND::default(), Some("100.71.140.68:7878"));
     driver.join().unwrap();
@@ -309,6 +326,7 @@ fn enter_on_cancel_cancels_and_does_not_pair() {
         assert!(enabled(dialog, ID_OK));
         focus(dialog, ID_CANCEL);
         press_enter(dialog);
+        wait_closed(dialog);
     });
     let shown = run(HWND::default(), Some("100.71.140.68:7878"));
     driver.join().unwrap();
@@ -425,10 +443,13 @@ fn the_window_grows_with_the_status_line_and_the_controls_follow() {
     assert!(shown.unwrap().is_none());
 }
 
-/// Saves what the dialog shows as a BMP in the folder that
-/// `ULLAGE_DIALOG_SHOTS` names, when it names one. Two pictures are made, one
-/// with `PrintWindow` and one by asking the window to print itself, so that a
-/// session without a screen still gives one of them.
+/// Saves what the dialog shows as a BMP named `name` in the folder that
+/// `ULLAGE_DIALOG_SHOTS` names, when it names one. `PrintWindow` is asked
+/// first, because it gives the whole window, with its title bar. When what it
+/// gives is one colour (a session without a screen gives black), the window is
+/// asked to print itself, which gives its client area and its controls, and
+/// the text of the address box is added (see `write_address`). Only the
+/// picture that is used is saved.
 fn shoot(dialog: HWND, name: &str, mode: Mode) {
     // `PrintWindow` is in a part of the `windows` crate that the program
     // does not otherwise need, so it is declared here, for the tests only.
@@ -451,45 +472,52 @@ fn shoot(dialog: HWND, name: &str, mode: Mode) {
         let _ = GetWindowRect(dialog, &mut rect);
     }
     let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
-    for (suffix, by_print_window) in [("", true), ("-print", false)] {
-        let mut surface = crate::win::surface::Surface::new(width, height).unwrap();
-        unsafe {
-            if by_print_window {
-                let _ = PrintWindow(dialog, surface.hdc, 2);
-            } else {
-                SendMessageW(
-                    dialog,
-                    WM_PRINT,
-                    Some(WPARAM(surface.hdc.0 as usize)),
-                    Some(LPARAM(PRINT_ALL as isize)),
-                );
-            }
-        }
-        if !by_print_window {
-            write_address(dialog, &surface, rect, mode);
-        }
-        let pixels = surface.pixels_mut();
-        // The alpha of a window that is drawn by the system can be 0.
-        for pixel in pixels.as_chunks_mut::<4>().0 {
-            pixel[3] = 255;
-        }
-        let mut file = Vec::new();
-        let size = pixels.len() as u32;
-        file.extend_from_slice(b"BM");
-        file.extend_from_slice(&(54 + size).to_le_bytes());
-        file.extend_from_slice(&[0; 4]);
-        file.extend_from_slice(&54u32.to_le_bytes());
-        file.extend_from_slice(&40u32.to_le_bytes());
-        file.extend_from_slice(&width.to_le_bytes());
-        // A negative height: the rows run top to bottom.
-        file.extend_from_slice(&(-height).to_le_bytes());
-        file.extend_from_slice(&1u16.to_le_bytes());
-        file.extend_from_slice(&32u16.to_le_bytes());
-        file.extend_from_slice(&[0; 24]);
-        file.extend_from_slice(pixels);
-        let path = std::path::Path::new(&folder).join(format!("{name}{suffix}.bmp"));
-        std::fs::write(path, file).unwrap();
+    let one_colour = |surface: &mut crate::win::surface::Surface| {
+        let first = surface.pixels_mut()[..3].to_vec();
+        surface
+            .pixels_mut()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[..3] == first[..])
+    };
+    let mut surface = crate::win::surface::Surface::new(width, height).unwrap();
+    unsafe {
+        let _ = PrintWindow(dialog, surface.hdc, 2);
     }
+    if one_colour(&mut surface) {
+        surface = crate::win::surface::Surface::new(width, height).unwrap();
+        unsafe {
+            SendMessageW(
+                dialog,
+                WM_PRINT,
+                Some(WPARAM(surface.hdc.0 as usize)),
+                Some(LPARAM(PRINT_ALL as isize)),
+            );
+        }
+        write_address(dialog, &surface, rect, mode);
+    }
+    let pixels = surface.pixels_mut();
+    // The alpha of a window that is drawn by the system can be 0.
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel[3] = 255;
+    }
+    let mut file = Vec::new();
+    let size = pixels.len() as u32;
+    file.extend_from_slice(b"BM");
+    file.extend_from_slice(&(54 + size).to_le_bytes());
+    file.extend_from_slice(&[0; 4]);
+    file.extend_from_slice(&54u32.to_le_bytes());
+    file.extend_from_slice(&40u32.to_le_bytes());
+    file.extend_from_slice(&width.to_le_bytes());
+    // A negative height: the rows run top to bottom.
+    file.extend_from_slice(&(-height).to_le_bytes());
+    file.extend_from_slice(&1u16.to_le_bytes());
+    file.extend_from_slice(&32u16.to_le_bytes());
+    file.extend_from_slice(&[0; 24]);
+    file.extend_from_slice(pixels);
+    let path = std::path::Path::new(&folder).join(format!("{name}.bmp"));
+    std::fs::write(path, file).unwrap();
 }
 
 /// A single-line edit control does not answer `WM_PRINT` in a session that has
@@ -628,4 +656,77 @@ fn the_window_prints_itself_in_the_colours_of_the_mode() {
         driver.join().unwrap();
         assert!(shown.unwrap().is_none());
     }
+}
+
+#[test]
+fn a_path_that_is_not_encrypted_is_paired_with_only_after_its_note_was_drawn() {
+    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let driver = drive(|dialog| {
+        // The code is whole. The address is typed, and the main button is
+        // pressed at once: the press is queued before the note is drawn, and
+        // is not the user's word.
+        set_text(dialog, ID_CODE, "abcdef");
+        set_text(dialog, ID_ADDRESS, "center:7878");
+        click(dialog, ID_OK);
+        // The dialog has handled the press (a message after it is answered
+        // only after it), and is still there.
+        unsafe {
+            SendMessageW(dialog, 0x0000, None, None);
+        }
+        assert!(
+            unsafe { IsWindow(Some(dialog)) }.as_bool(),
+            "paired too early"
+        );
+        // Once it is drawn, the next press counts.
+        thread::sleep(Duration::from_millis(400));
+        click(dialog, ID_OK);
+        wait_closed(dialog);
+    });
+    let shown = run(HWND::default(), None);
+    driver.join().unwrap();
+    let entry = shown.unwrap().expect("the second press pairs");
+    assert_eq!(entry.address, "center:7878");
+}
+
+#[test]
+fn a_path_that_is_encrypted_needs_no_note() {
+    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let driver = drive(|dialog| {
+        set_text(dialog, ID_CODE, "abcdef");
+        set_text(dialog, ID_ADDRESS, "100.71.140.68:7878");
+        click(dialog, ID_OK);
+        wait_closed(dialog);
+    });
+    let shown = run(HWND::default(), None);
+    driver.join().unwrap();
+    assert!(shown.unwrap().is_some());
+}
+
+#[test]
+fn a_handle_that_is_not_a_device_context_is_not_drawn_on() {
+    use windows::Win32::Graphics::Gdi::CreateSolidBrush;
+    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let surface = crate::win::surface::Surface::new(8, 8).unwrap();
+    assert!(is_dc(surface.hdc));
+    assert!(!is_dc(HDC(std::ptr::null_mut())));
+    assert!(!is_dc(HDC(0xdead_beef as *mut _)));
+    let brush = unsafe { CreateSolidBrush(windows::Win32::Foundation::COLORREF(0)) };
+    // A brush and a bitmap are handles of GDI objects, and not device contexts.
+    assert!(!is_dc(HDC(brush.0)));
+    assert!(!is_dc(HDC(surface.bitmap.0)));
+    // Handle values cross threads; handles do not.
+    let handles = [brush.0 as usize, surface.bitmap.0 as usize];
+    let driver = drive(move |dialog| {
+        for handle in handles {
+            for message in [0x0318u32 /* WM_PRINTCLIENT */, WM_CTLCOLOREDIT] {
+                unsafe {
+                    SendMessageW(dialog, message, Some(WPARAM(handle)), Some(LPARAM(0)));
+                }
+            }
+        }
+        click(dialog, ID_CANCEL);
+    });
+    let shown = run(HWND::default(), None);
+    driver.join().unwrap();
+    assert!(shown.unwrap().is_none());
 }

@@ -500,7 +500,11 @@ pub struct Renderer {
     dpi: u32,
 }
 
-fn make_target(factory: &ID2D1Factory, surface: &Surface, dpi: u32) -> Result<ID2D1DCRenderTarget> {
+pub(super) fn make_target(
+    factory: &ID2D1Factory,
+    surface: &Surface,
+    dpi: u32,
+) -> Result<ID2D1DCRenderTarget> {
     unsafe {
         let properties = D2D1_RENDER_TARGET_PROPERTIES {
             r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
