@@ -958,5 +958,8 @@ fn clear(hwnd: HWND, shared: &Shared) {
 }
 
 #[cfg(test)]
+#[path = "pair_dialog_pictures.rs"]
+mod pictures;
+#[cfg(test)]
 #[path = "pair_dialog_tests.rs"]
 mod tests;

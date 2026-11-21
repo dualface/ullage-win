@@ -13,7 +13,7 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CombineRgn, CreateFontW, CreateRectRgn,
     CreateSolidBrush, DEFAULT_CHARSET, DeleteObject, GetClipRgn, GetDCOrgEx, GetObjectType,
-    GetRandomRgn, GetRgnBox, HBRUSH, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, OffsetRgn,
+    GetRandomRgn, GetRgnBox, HBRUSH, HDC, HFONT, HGDIOBJ, HRGN, OUT_DEFAULT_PRECIS, OffsetRgn,
     RGN_COMBINE_MODE, SRCCOPY,
 };
 use windows::core::{Interface, Result};
@@ -44,49 +44,123 @@ pub fn is_dc(hdc: HDC) -> bool {
     matches!(unsafe { GetObjectType(HGDIOBJ(hdc.0)) }, 3 | 10)
 }
 
+/// Regions that are deleted when this is dropped.
+struct Regions(Vec<HRGN>);
+
+impl Regions {
+    /// A region of the rectangle, or `None` when Windows made none.
+    fn rect(&mut self, left: i32, top: i32, right: i32, bottom: i32) -> Option<HRGN> {
+        let region = unsafe { CreateRectRgn(left, top, right, bottom) };
+        if region.is_invalid() {
+            return None;
+        }
+        self.0.push(region);
+        Some(region)
+    }
+}
+
+impl Drop for Regions {
+    fn drop(&mut self) {
+        for region in &self.0 {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(region.0));
+            }
+        }
+    }
+}
+
+/// Counts the calls of a check, so that a test can make any one of them fail:
+/// the one at `fail_at` counts as having failed, whatever it did. Nothing
+/// fails in the program (`fail_at` is `None`).
+pub(super) struct Trip {
+    fail_at: Option<usize>,
+    pub(super) calls: usize,
+}
+
+impl Trip {
+    pub(super) fn new(fail_at: Option<usize>) -> Self {
+        Self { fail_at, calls: 0 }
+    }
+
+    /// Whether a call that `worked` is to be taken as having worked.
+    fn worked(&mut self, worked: bool) -> bool {
+        self.calls += 1;
+        worked && self.fail_at != Some(self.calls)
+    }
+}
+
 /// Whether every pixel of `rect` (x, y, width, height, in the pixels of the
-/// device context) can be seen on it: it is in the region of the device
-/// context that the system gives (what shows of the window: not off the
-/// screen, not under another window, not outside what is to be painted) and
-/// in the clip region that was selected into it. A box around what shows is not
-/// enough, because what shows can have a hole.
-fn fully_visible(hdc: HDC, rect: (i32, i32, i32, i32)) -> bool {
+/// device context) can be seen on it.
+pub(super) fn fully_visible(hdc: HDC, rect: (i32, i32, i32, i32)) -> bool {
+    fully_visible_by(hdc, rect, &mut Trip::new(None))
+}
+
+/// [`fully_visible`], with a [`Trip`] to make a call fail. The note is in the
+/// region of the device context that the system gives (what shows of the
+/// window: not off the screen, not under another window, not outside what is
+/// to be painted) and in the clip region that was selected into it. A box
+/// round what shows is not enough, because what shows can have a hole.
+///
+/// Any call that fails makes the answer no: an answer that is not known is
+/// not that the note can be seen, and an empty region from a failed operation
+/// is not an empty part of the note.
+pub(super) fn fully_visible_by(hdc: HDC, rect: (i32, i32, i32, i32), trip: &mut Trip) -> bool {
     const RGN_OR: RGN_COMBINE_MODE = RGN_COMBINE_MODE(2);
     const RGN_DIFF: RGN_COMBINE_MODE = RGN_COMBINE_MODE(4);
     const SYSRGN: i32 = 4;
+    const ERROR: i32 = 0;
     const NULLREGION: i32 = 1;
     let (x, y, w, h) = rect;
+    let mut held = Regions(Vec::new());
+    let mut make = |trip: &mut Trip, rect: (i32, i32, i32, i32)| {
+        let region = held.rect(rect.0, rect.1, rect.2, rect.3);
+        region.filter(|_| trip.worked(true))
+    };
+    let (Some(note), Some(uncovered), Some(scratch), Some(system), Some(clip)) = (
+        make(trip, (x, y, x + w, y + h)),
+        make(trip, (0, 0, 0, 0)),
+        make(trip, (0, 0, 0, 0)),
+        make(trip, (0, 0, 0, 0)),
+        make(trip, (0, 0, 0, 0)),
+    ) else {
+        return false;
+    };
     unsafe {
-        let note = CreateRectRgn(x, y, x + w, y + h);
-        let uncovered = CreateRectRgn(0, 0, 0, 0);
-        let scratch = CreateRectRgn(0, 0, 0, 0);
+        // What the system gives is in the coordinates of the screen.
         let mut origin = POINT::default();
-        let mut visible = GetDCOrgEx(hdc, &mut origin).as_bool() && {
-            // What the system gives is in the coordinates of the screen.
-            let system = CreateRectRgn(0, 0, 0, 0);
-            let got = GetRandomRgn(hdc, system, SYSRGN) == 1;
-            if got {
-                OffsetRgn(system, -origin.x, -origin.y);
-                CombineRgn(Some(uncovered), Some(note), Some(system), RGN_DIFF);
-            }
-            let _ = DeleteObject(HGDIOBJ(system.0));
-            got
-        };
-        if visible {
-            // And what was selected as the clip region, when one was.
-            let clip = CreateRectRgn(0, 0, 0, 0);
-            if GetClipRgn(hdc, clip) == 1 {
-                CombineRgn(Some(scratch), Some(note), Some(clip), RGN_DIFF);
-                CombineRgn(Some(uncovered), Some(uncovered), Some(scratch), RGN_OR);
-            }
-            let _ = DeleteObject(HGDIOBJ(clip.0));
-            let mut left = RECT::default();
-            visible = GetRgnBox(uncovered, &mut left).0 == NULLREGION;
+        if !trip.worked(GetDCOrgEx(hdc, &mut origin).as_bool()) {
+            return false;
         }
-        for region in [note, uncovered, scratch] {
-            let _ = DeleteObject(HGDIOBJ(region.0));
+        if !trip.worked(GetRandomRgn(hdc, system, SYSRGN) == 1) {
+            return false;
         }
-        visible
+        if !trip.worked(OffsetRgn(system, -origin.x, -origin.y).0 != ERROR) {
+            return false;
+        }
+        // What of the note is not in it.
+        let left_out = CombineRgn(Some(uncovered), Some(note), Some(system), RGN_DIFF);
+        if !trip.worked(left_out.0 != ERROR) {
+            return false;
+        }
+        // And what was selected as the clip region: 0 is that there is none,
+        // and -1 is that Windows could not say.
+        let selected = GetClipRgn(hdc, clip);
+        if !trip.worked(selected >= 0) {
+            return false;
+        }
+        if selected == 1 {
+            let cut = CombineRgn(Some(scratch), Some(note), Some(clip), RGN_DIFF);
+            if !trip.worked(cut.0 != ERROR) {
+                return false;
+            }
+            let joined = CombineRgn(Some(uncovered), Some(uncovered), Some(scratch), RGN_OR);
+            if !trip.worked(joined.0 != ERROR) {
+                return false;
+            }
+        }
+        let mut bounds = RECT::default();
+        let kind = GetRgnBox(uncovered, &mut bounds).0;
+        trip.worked(kind != ERROR) && kind == NULLREGION
     }
 }
 
