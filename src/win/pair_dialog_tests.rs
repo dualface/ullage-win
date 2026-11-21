@@ -878,3 +878,78 @@ fn the_compositor_can_be_waited_for_once_without_hanging() {
         .expect("waiting for the compositor returns");
     println!("DWM FLUSH in this session: {answer}");
 }
+
+/// Sets the time it is when the note is put on the screen, and the time of the
+/// message that is handled after.
+fn set_times(dialog: HWND, now: u32, message: u32) {
+    unsafe {
+        SendMessageW(
+            dialog,
+            TEST_SET_TIMES,
+            Some(WPARAM(now as usize)),
+            Some(LPARAM(message as isize)),
+        );
+    }
+}
+
+/// Draws the note at time `now`, then presses with a message made at time
+/// `message`, and says whether that press paired. A press that is refused is
+/// followed by one made later, so that the dialog ends.
+fn pairs_when_made_at(now: u32, message: u32) -> bool {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let driver = drive(move |dialog| {
+        set_text(dialog, ID_CODE, "abcdef");
+        set_times(dialog, now, message);
+        paint_on_window(dialog);
+        press(dialog, ID_OK);
+        // A press that paired has cleared the boxes; one that was refused has
+        // left them.
+        let paired = text_of(dialog, ID_CODE).is_empty();
+        let _ = sender.send(paired);
+        if !paired {
+            set_times(dialog, now, now.wrapping_add(100));
+            press(dialog, ID_OK);
+        }
+    });
+    let _ = run(HWND::default(), Some("center:7878"));
+    driver.join().unwrap();
+    receiver.recv().unwrap()
+}
+
+#[test]
+fn a_press_made_before_the_note_was_on_the_screen_does_not_pair() {
+    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    // Made before the note: it was in the queue while the note was waited for.
+    assert!(!pairs_when_made_at(1000, 990), "paired by an earlier press");
+    // The same millisecond cannot be told from before.
+    assert!(!pairs_when_made_at(1000, 1000), "paired by the same time");
+    // Made after: the user's press.
+    assert!(pairs_when_made_at(1000, 1001), "a later press must pair");
+    // The clocks wrap: 10 is after u32::MAX - 5, and not the other way.
+    assert!(pairs_when_made_at(u32::MAX - 5, 10), "after the wrap");
+    assert!(
+        !pairs_when_made_at(10, u32::MAX - 5),
+        "before, across the wrap"
+    );
+}
+
+#[test]
+fn drawing_the_same_note_again_does_not_move_the_time_on() {
+    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let driver = drive(|dialog| {
+        set_text(dialog, ID_CODE, "abcdef");
+        set_times(dialog, 1000, 1500);
+        paint_on_window(dialog);
+        // The same note is drawn again later, and the time of that is later
+        // than the press: the press is still after the first time it was seen.
+        set_times(dialog, 2000, 1500);
+        paint_on_window(dialog);
+        press(dialog, ID_OK);
+    });
+    let shown = run(HWND::default(), Some("center:7878"));
+    driver.join().unwrap();
+    assert!(
+        shown.unwrap().is_some(),
+        "a repaint refused the user's press"
+    );
+}

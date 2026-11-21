@@ -17,6 +17,8 @@ use windows::Win32::Graphics::Gdi::{
     GetRandomRgn, GetRgnBox, HBRUSH, HDC, HFONT, HGDIOBJ, HRGN, OUT_DEFAULT_PRECIS, OffsetRgn,
     RGN_COMBINE_MODE, SRCCOPY,
 };
+#[cfg(not(test))]
+use windows::Win32::UI::WindowsAndMessaging::GetMessageTime;
 use windows::core::{Interface, Result};
 
 use super::gfx::{Painter, make_target};
@@ -248,6 +250,41 @@ pub struct Ui {
     /// that went through is not yet on the screen: the compositor puts the
     /// picture of the window there after it. The tests give another one.
     pub presenter: Cell<fn() -> bool>,
+    /// When the note was put on the screen, in the milliseconds of the system
+    /// clock (the one that `GetMessageTime` is read in).
+    noted_at: Cell<u32>,
+    /// The system clock now, and the time of the message that is being
+    /// handled. The tests give others.
+    clock: Cell<fn() -> u32>,
+    message_clock: Cell<fn() -> u32>,
+}
+
+/// Milliseconds since the system started: the clock of `GetMessageTime`.
+#[cfg(not(test))]
+fn system_tick() -> u32 {
+    unsafe { windows::Win32::System::SystemInformation::GetTickCount() }
+}
+
+#[cfg(not(test))]
+fn message_tick() -> u32 {
+    // The time of a message is the same count as `GetTickCount` gives, as a
+    // signed number that wraps.
+    unsafe { GetMessageTime() as u32 }
+}
+
+// The clocks of the tests: they say what time it is, and what time the
+// message that is being handled was made, so that the order of the two can be
+// chosen. Without them being set, the message is made after the note.
+#[cfg(test)]
+thread_local! {
+    static TEST_NOW: Cell<u32> = const { Cell::new(100) };
+    static TEST_MESSAGE: Cell<u32> = const { Cell::new(200) };
+}
+
+#[cfg(test)]
+pub fn set_test_times(now: u32, message: u32) {
+    TEST_NOW.set(now);
+    TEST_MESSAGE.set(message);
 }
 
 /// Waits for the next frame of the desktop compositor, which has what was
@@ -280,7 +317,26 @@ impl Ui {
             presenter: Cell::new(|| true),
             #[cfg(not(test))]
             presenter: Cell::new(wait_for_the_screen),
+            noted_at: Cell::new(0),
+            #[cfg(test)]
+            clock: Cell::new(|| TEST_NOW.get()),
+            #[cfg(not(test))]
+            clock: Cell::new(system_tick),
+            #[cfg(test)]
+            message_clock: Cell::new(|| TEST_MESSAGE.get()),
+            #[cfg(not(test))]
+            message_clock: Cell::new(message_tick),
         })
+    }
+
+    /// Whether the message that is being handled was made after the note was
+    /// put on the screen: the press is then the user's, who saw the note. A
+    /// press that was already waiting in the queue when the note was drawn is
+    /// made before it, and so is one at the same millisecond, which cannot be
+    /// told from before. Both clocks wrap, so the order is the sign of the
+    /// difference.
+    pub fn made_after_the_note(&self) -> bool {
+        ((self.message_clock.get())().wrapping_sub(self.noted_at.get()) as i32) > 0
     }
 
     pub fn typography(&self) -> &Typography {
@@ -384,7 +440,15 @@ impl Ui {
                 .is_some_and(|note| fully_visible(hdc, to_pixels(note, self.dpi.get())))
             && (self.presenter.get())()
         {
-            *self.noted.borrow_mut() = Some(address.to_owned());
+            // Read after the wait: a press that was made during it is made
+            // before this time, and is refused. Only the first time the note
+            // of an address is on the screen counts: a later drawing of the
+            // same note must not move the time on, or a press that came after
+            // the first one would be refused for it.
+            if self.noted.borrow().as_deref() != Some(address) {
+                self.noted_at.set((self.clock.get())());
+                *self.noted.borrow_mut() = Some(address.to_owned());
+            }
         }
         Ok(())
     }

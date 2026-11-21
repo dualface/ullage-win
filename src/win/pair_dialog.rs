@@ -96,6 +96,9 @@ const TEST_PAINT_WINDOW: u32 = 0x8000 + 0x77;
 /// when the compositor is waited for.
 #[cfg(test)]
 const TEST_SET_SCREEN: u32 = 0x8000 + 0x78;
+/// A message of the tests: the times of the clocks.
+#[cfg(test)]
+const TEST_SET_TIMES: u32 = 0x8000 + 0x79;
 /// `DWMWA_USE_IMMERSIVE_DARK_MODE`.
 const DARK_TITLE_BAR: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(20);
 
@@ -301,6 +304,13 @@ unsafe extern "system" fn dialog_proc(
         #[cfg(test)]
         TEST_PAINT_WINDOW if shared_of(hwnd).is_some() => {
             draw_dialog_on(hwnd, HDC(wparam.0 as *mut _), true);
+            1
+        }
+        // The clock of the tests: `wparam` is the time it is when the note is
+        // noted, and `lparam` the time of the message that is handled after.
+        #[cfg(test)]
+        TEST_SET_TIMES => {
+            super::pair_paint::set_test_times(wparam.0 as u32, lparam.0 as u32);
             1
         }
         #[cfg(test)]
@@ -935,11 +945,12 @@ fn accept(hwnd: HWND, shared: &Shared) {
         return;
     }
     // A path that is not encrypted is paired with only after its note has been
-    // on the screen: an Enter that was queued before the note was drawn is not
+    // on the screen, and by a press that was made after that: an Enter that
+    // was queued before the note was drawn, or while it was waited for, is not
     // the user's word. The dialog is drawn again, and the next press counts.
     if let Some(ui) = ui_of(shared)
         && status(&address) == Status::Plaintext
-        && ui.noted.borrow().as_deref() != Some(address.as_str())
+        && (ui.noted.borrow().as_deref() != Some(address.as_str()) || !ui.made_after_the_note())
     {
         invalidate(hwnd);
         return;
