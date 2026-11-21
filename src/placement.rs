@@ -195,4 +195,50 @@ mod tests {
         // Too big to fit: pinned to the top left.
         assert_eq!(keep_inside(PRIMARY, (100, 100), (2500, 1200)), (0, 0));
     }
+
+    #[test]
+    fn a_window_on_a_removed_monitor_comes_back_to_the_one_left() {
+        assert_eq!(keep_inside(PRIMARY, (2500, 100), (800, 500)), (1120, 100));
+    }
+
+    #[test]
+    fn a_window_beyond_a_smaller_resolution_comes_back() {
+        let smaller = Edges {
+            left: 0,
+            top: 0,
+            right: 1280,
+            bottom: 680,
+        };
+        assert_eq!(keep_inside(smaller, (1100, 500), (400, 300)), (880, 380));
+    }
+
+    #[test]
+    fn a_work_area_that_shrinks_at_the_top_or_the_left_pushes_the_window_in() {
+        let bar_on_top = Edges { top: 40, ..PRIMARY };
+        let bar_on_left = Edges {
+            left: 60,
+            ..PRIMARY
+        };
+        assert_eq!(keep_inside(bar_on_top, (100, 0), (800, 500)), (100, 40));
+        assert_eq!(keep_inside(bar_on_left, (0, 100), (800, 500)), (60, 100));
+    }
+
+    #[test]
+    fn a_window_inside_a_work_area_at_negative_coordinates_stays() {
+        let left_of_primary = Edges {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1040,
+        };
+        assert_eq!(
+            keep_inside(left_of_primary, (-1500, 50), (800, 500)),
+            (-1500, 50)
+        );
+    }
+
+    #[test]
+    fn a_window_larger_than_the_work_area_lines_up_with_its_start() {
+        assert_eq!(keep_inside(SECOND, (2000, 100), (2500, 1200)), (1920, 0));
+    }
 }
