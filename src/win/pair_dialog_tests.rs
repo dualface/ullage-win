@@ -23,7 +23,15 @@ fn find_dialog() -> HWND {
     let started = Instant::now();
     loop {
         let found = unsafe { FindWindowW(PCWSTR::null(), pcwstr(&title)) };
-        if let Ok(hwnd) = found {
+        // The window is there while it is still being made: wait until its
+        // controls are, and until the dialog has answered a message, which it
+        // does only after it has opened.
+        if let Ok(hwnd) = found
+            && unsafe { GetDlgItem(Some(hwnd), ID_CANCEL.into()) }.is_ok()
+        {
+            unsafe {
+                SendMessageW(hwnd, 0x0000, None, None);
+            }
             return hwnd;
         }
         assert!(started.elapsed() < Duration::from_secs(10), "no dialog");
