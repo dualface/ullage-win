@@ -195,14 +195,25 @@ impl Ui {
             painter.begin();
             painter.draw_shapes(shapes, (0.0, 0.0));
             painter.end()?;
-            let _ = BitBlt(hdc, 0, 0, size.0, size.1, Some(surface.hdc), 0, 0, SRCCOPY);
+            BitBlt(hdc, 0, 0, size.0, size.1, Some(surface.hdc), 0, 0, SRCCOPY)?;
         }
         Ok(())
     }
 
     /// The dialog: its background, and what is not a control. `address` is
     /// what the address box holds.
-    pub fn draw_dialog(&self, hdc: HDC, size: (i32, i32), address: &str) -> Result<()> {
+    ///
+    /// `on_screen` is for a device context that is the window's own, the one
+    /// that `WM_PAINT` gives: only what is drawn there is on the screen, and
+    /// only then is the note of a path that is not encrypted taken to have
+    /// been seen. A drawing that goes to memory (a print, a picture) is not.
+    pub fn draw_dialog(
+        &self,
+        hdc: HDC,
+        size: (i32, i32),
+        address: &str,
+        on_screen: bool,
+    ) -> Result<()> {
         let model = Model {
             address: address.to_owned(),
             focus: self.focus.get(),
@@ -218,7 +229,7 @@ impl Ui {
         shapes.extend(frame.shapes);
         self.draw(hdc, size, &shapes)?;
         // The note is on the screen now: that address may be paired with.
-        if status(address) == Status::Plaintext {
+        if on_screen && status(address) == Status::Plaintext {
             *self.noted.borrow_mut() = Some(address.to_owned());
         }
         Ok(())

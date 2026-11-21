@@ -179,7 +179,7 @@ fn a_dialog_formats_the_code_and_takes_only_a_whole_one() {
         set_text(dialog, ID_ADDRESS, "Center:7878");
         assert!(enabled(dialog, ID_OK));
         // The note of a path that is not encrypted is drawn first.
-        draw_once(dialog);
+        paint_on_window(dialog);
         click(dialog, ID_OK);
     });
     let shown = run(HWND::default(), Some("center:7878"));
@@ -261,10 +261,18 @@ fn focus(dialog: HWND, id: u16) {
     }
 }
 
-/// Has the dialog draw itself once, as it is when the screen shows it: a
-/// session without a screen gets no `WM_PAINT`, so the window is asked to
-/// print itself, which draws the same things.
-fn draw_once(dialog: HWND) {
+/// Has the dialog draw itself on the window, as `WM_PAINT` does. A session
+/// without a screen never sends `WM_PAINT` to a window that is not shown, so
+/// the dialog has a message for this in the tests.
+fn paint_on_window(dialog: HWND) {
+    unsafe {
+        SendMessageW(dialog, TEST_PAINT_WINDOW, None, None);
+    }
+}
+
+/// Has the dialog print itself into memory, as a picture of it does. That
+/// is not the screen.
+fn print_to_memory(dialog: HWND) {
     const WM_PRINT: u32 = 0x0317;
     let mut rect = RECT::default();
     unsafe {
@@ -519,6 +527,18 @@ fn shoot(dialog: HWND, name: &str, mode: Mode) {
         }
         write_address(dialog, &surface, rect, mode);
     }
+    // Last, when the window gave nothing: the scene of the dialog, drawn the
+    // way the dialog draws it (`Ui`), without the native controls.
+    if one_colour(&mut surface) {
+        surface = crate::win::surface::Surface::new(width, height).unwrap();
+        let ui = Ui::new(mode, 96).unwrap();
+        let _ = ui.draw_dialog(
+            surface.hdc,
+            (width, height),
+            &text_of(dialog, ID_ADDRESS),
+            false,
+        );
+    }
     let pixels = surface.pixels_mut();
     // The alpha of a window that is drawn by the system can be 0.
     for pixel in pixels.as_chunks_mut::<4>().0 {
@@ -610,7 +630,7 @@ fn the_dialog_draws_its_background_and_its_shapes_on_a_surface() {
     for mode in [Mode::Light, Mode::Dark] {
         let ui = Ui::new(mode, 96).expect("the fonts and the factory");
         let mut surface = Surface::new(420, 300).unwrap();
-        ui.draw_dialog(surface.hdc, (420, 300), "center:7878")
+        ui.draw_dialog(surface.hdc, (420, 300), "center:7878", false)
             .expect("drawing on a surface works");
         let background = colorref(mode, Role::Win);
         let pixels = surface.pixels_mut();
@@ -692,22 +712,53 @@ fn a_path_that_is_not_encrypted_is_paired_with_only_after_its_note_was_drawn() {
         click(dialog, ID_OK);
         // The dialog has handled the press (a message after it is answered
         // only after it), and is still there.
-        unsafe {
-            SendMessageW(dialog, 0x0000, None, None);
-        }
-        assert!(
-            unsafe { IsWindow(Some(dialog)) }.as_bool(),
-            "paired too early"
-        );
-        // Once the note is drawn, the next press counts.
-        draw_once(dialog);
+        let still_there = |dialog: HWND| {
+            unsafe {
+                SendMessageW(dialog, 0x0000, None, None);
+            }
+            unsafe { IsWindow(Some(dialog)) }.as_bool()
+        };
+        assert!(still_there(dialog), "paired too early");
+        // A print into memory is not the screen: it does not count either.
+        print_to_memory(dialog);
+        click(dialog, ID_OK);
+        assert!(still_there(dialog), "paired after a print into memory");
+        // Once the note is on the window, the next press counts.
+        paint_on_window(dialog);
         click(dialog, ID_OK);
         wait_closed(dialog);
     });
     let shown = run(HWND::default(), None);
     driver.join().unwrap();
-    let entry = shown.unwrap().expect("the second press pairs");
+    let entry = shown.unwrap().expect("the press after the paint pairs");
     assert_eq!(entry.address, "center:7878");
+}
+
+#[test]
+fn a_note_that_was_seen_is_forgotten_when_the_address_changes() {
+    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let driver = drive(|dialog| {
+        set_text(dialog, ID_CODE, "abcdef");
+        set_text(dialog, ID_ADDRESS, "center:7878");
+        paint_on_window(dialog);
+        // Another address, and back: the note of the first is not seen again.
+        set_text(dialog, ID_ADDRESS, "nas:7878");
+        set_text(dialog, ID_ADDRESS, "center:7878");
+        click(dialog, ID_OK);
+        unsafe {
+            SendMessageW(dialog, 0x0000, None, None);
+        }
+        assert!(
+            unsafe { IsWindow(Some(dialog)) }.as_bool(),
+            "paired with a note that was not seen again"
+        );
+        paint_on_window(dialog);
+        click(dialog, ID_OK);
+        wait_closed(dialog);
+    });
+    let shown = run(HWND::default(), None);
+    driver.join().unwrap();
+    assert!(shown.unwrap().is_some());
 }
 
 #[test]
@@ -751,4 +802,10 @@ fn a_handle_that_is_not_a_device_context_is_not_drawn_on() {
     let shown = run(HWND::default(), None);
     driver.join().unwrap();
     assert!(shown.unwrap().is_none());
+    // The brush is the test's, and is let go of here.
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::DeleteObject(
+            windows::Win32::Graphics::Gdi::HGDIOBJ(brush.0),
+        );
+    }
 }

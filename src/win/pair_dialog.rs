@@ -88,6 +88,9 @@ const WM_UNDO: u32 = 0x0304;
 const WM_DPICHANGED: u32 = 0x02E0;
 const BM_SETSTATE: u32 = 0x00F3;
 const UISF_HIDEFOCUS: isize = 0x1;
+/// A message of the tests: draw on the window's own device context.
+#[cfg(test)]
+const TEST_PAINT_WINDOW: u32 = 0x8000 + 0x77;
 /// `DWMWA_USE_IMMERSIVE_DARK_MODE`.
 const DARK_TITLE_BAR: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(20);
 
@@ -287,6 +290,19 @@ unsafe extern "system" fn dialog_proc(
             // The focus is set there, so the dialog manager must not.
             0
         }
+        // For the tests, which run where the window is never shown and so is
+        // never sent `WM_PAINT`: draw on the window's own device context, as
+        // `WM_PAINT` does.
+        #[cfg(test)]
+        TEST_PAINT_WINDOW if shared_of(hwnd).is_some() => {
+            unsafe {
+                use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
+                let hdc = GetDC(Some(hwnd));
+                draw_dialog_on(hwnd, hdc, true);
+                ReleaseDC(Some(hwnd), hdc);
+            }
+            1
+        }
         // The rest have no state to act on before `WM_INITDIALOG`, and are
         // left to the default procedure then.
         WM_ERASEBKGND if shared_of(hwnd).is_some() => answer(hwnd, 1),
@@ -309,8 +325,9 @@ unsafe extern "system" fn dialog_proc(
             }
             0
         }
-        // Only the DPI that is in `wparam` is used. The rectangle that
-        // `lparam` points to is not read: the layout is made again.
+        // The DPI is the one that the window has (`GetDpiForWindow`), not the
+        // one in `wparam`, which can be anything. The rectangle that `lparam`
+        // points to is not read: the layout is made again.
         WM_DPICHANGED => {
             if let Some(shared) = shared_of(hwnd)
                 && let Some(ui) = ui_of(&shared)
@@ -543,23 +560,31 @@ fn paint_button(hwnd: HWND, ui: Option<&Ui>, on: Option<HDC>) {
     }
 }
 
+/// Draws the dialog on `on`, a device context that was asked for (a print), or,
+/// when there is none, on the window itself (`WM_PAINT`).
 fn paint_dialog(hwnd: HWND, on: Option<HDC>) {
     let mut paint = PAINTSTRUCT::default();
     let hdc = match on {
         Some(hdc) => hdc,
         None => unsafe { BeginPaint(hwnd, &mut paint) },
     };
+    draw_dialog_on(hwnd, hdc, on.is_none());
+    if on.is_none() {
+        unsafe {
+            let _ = EndPaint(hwnd, &paint);
+        }
+    }
+}
+
+/// Draws the dialog on `hdc`, which `on_screen` says is the window's own.
+fn draw_dialog_on(hwnd: HWND, hdc: HDC, on_screen: bool) {
     // No borrow is held while drawing: the state is cloned out first.
     if let Some(shared) = shared_of(hwnd)
         && let Some(ui) = ui_of(&shared)
         && is_dc(hdc)
     {
-        let _ = ui.draw_dialog(hdc, client_pixels(hwnd), &text_of(hwnd, ID_ADDRESS));
-    }
-    if on.is_none() {
-        unsafe {
-            let _ = EndPaint(hwnd, &paint);
-        }
+        let address = text_of(hwnd, ID_ADDRESS);
+        let _ = ui.draw_dialog(hdc, client_pixels(hwnd), &address, on_screen);
     }
 }
 
@@ -855,6 +880,11 @@ fn refresh(hwnd: HWND) {
     let Some(ui) = ui_of(&shared) else {
         return;
     };
+    // The note that was seen was the note of an address: another address has
+    // none yet.
+    if ui.noted.borrow().as_deref() != Some(address.as_str()) {
+        *ui.noted.borrow_mut() = None;
+    }
     let label = primary_label(&status(&address));
     if text_of(hwnd, ID_OK) != label {
         set_text(hwnd, ID_OK, label);
