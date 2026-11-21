@@ -452,7 +452,10 @@ mod tests {
         let pieces = strip_pieces(&scene);
         for (name, rect) in &pieces {
             assert!(
-                rect.x >= BORDER && rect.right() <= scene.width - BORDER,
+                rect.x >= BORDER
+                    && rect.right() <= scene.width - BORDER
+                    && rect.y >= BORDER
+                    && rect.bottom() <= scene.content_top,
                 "{name} leaves the window: {rect:?}"
             );
         }

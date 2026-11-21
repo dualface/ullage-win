@@ -151,6 +151,11 @@ pub(super) fn build(
         })
         .collect();
     let reset_col = reset_column_width(&fonts, measure);
+    // A window wide enough for every line's reserved room (it always is,
+    // unless it is capped) keeps each label whole: a reading wider than its
+    // reserve is cut back instead. In a capped window the label gives way
+    // to the reading down to `MIN_LABEL_WIDTH`.
+    let roomy = needed_width(cards, scale, measure) <= inner_width + 2.0 * BORDER;
 
     let row_height = ROW_HEIGHT * scale;
     let left = PAD_SIDE + ROW_PAD;
@@ -176,8 +181,13 @@ pub(super) fn build(
         let prefix = reading
             .prefix
             .map(|word| (word, prefix_width(word, &fonts, measure)));
+        let label_room = if roomy {
+            label_full
+        } else {
+            label_full.min(MIN_LABEL_WIDTH)
+        };
         let fit = fit_reading(
-            reading_right - left - label_full.min(MIN_LABEL_WIDTH) - COLUMN_GAP,
+            reading_right - left - label_room - COLUMN_GAP,
             text_box_width(measure, &reading.value, fonts.value),
             prefix.map_or(0.0, |(_, width)| width),
         );

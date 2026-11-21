@@ -215,3 +215,32 @@ fn a_longer_label_widens_the_strip_until_the_cap_and_removing_it_restores_the_wi
     cards.pop();
     assert_eq!(width_of(&cards), base);
 }
+
+#[test]
+fn a_reading_wider_than_its_reserve_is_cut_back_before_the_label_is() {
+    // At text size 16 `$3.20` is wider than the room reserved for `100%`.
+    let cards = |spent: &str| {
+        vec![
+            card(
+                "cursor",
+                None,
+                "account-1",
+                vec![row("weekly", Reading::Spent(spent.into()), Some(0.5), None)],
+            ),
+            account("cursor", remaining("50%"), None),
+        ]
+    };
+    let scene_of = |cards: &[UsageCard]| {
+        let mut input = input(cards);
+        input.text_size = 16;
+        build(&input, &FakeMeasure)
+    };
+    let scene = scene_of(&cards("$3.20"));
+    // The window is the same as with a reading that fits the reserve.
+    assert_eq!(scene.width, scene_of(&cards("$3")).width);
+    assert!(scene.width < 290.0);
+    let label = text_of(&scene.content, "cursor-1");
+    assert_eq!(label.rect.w, box_of(8, 12.0 * 16.0 / 13.0));
+    assert!(text_of(&scene.content, "$3.20").ellipsis);
+    assert_lines_fit(&scene);
+}
