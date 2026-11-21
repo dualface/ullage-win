@@ -14,6 +14,11 @@ the compact strip shows less (see below).
   hours and minutes (`5h03m`). It names the account by its provider only,
   numbered when the provider has more than one account (`claude-1`,
   `claude-2`), and leaves out the account name and the name of the row.
+  The strip is as wide as its longest line needs, at most 290 DIPs. Its
+  width follows the longest account label, and changes when an account is
+  added or removed, or when a reading changes kind (for example from a
+  percentage to `unlimited` or to a used amount). It does not change with the
+  usage numbers or the reset times.
 - Follows the system light and dark setting.
 - Refreshes every 2 minutes. It only reads: it signs in to nothing and changes
   no account. The one thing it does to a remote daemon is that pairing
