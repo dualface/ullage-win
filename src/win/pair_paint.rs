@@ -70,8 +70,9 @@ impl Drop for Regions {
 }
 
 /// Counts the calls of a check, so that a test can make any one of them fail:
-/// the one at `fail_at` counts as having failed, whatever it did. Nothing
-/// fails in the program (`fail_at` is `None`).
+/// the one at `fail_at` counts as having failed, whatever it did. The program
+/// injects no failure (`fail_at` is `None`), and a call that really fails is
+/// still a failure: it makes the answer no, and the note is not registered.
 pub(super) struct Trip {
     fail_at: Option<usize>,
     pub(super) calls: usize,
