@@ -195,9 +195,10 @@ mod tests {
     #[test]
     #[ignore = "a measurement, not a check; run with --ignored --nocapture in a release build"]
     fn rebuild_time_of_the_largest_reply() {
-        let typography = Typography::new().unwrap();
         let reply = full_reply();
         for layout in [Layout::Columns, Layout::Single, Layout::Compact] {
+            // A new one for each layout, so that "cold" is cold for all.
+            let typography = Typography::new().unwrap();
             for pass in ["cold", "warm"] {
                 let started = Instant::now();
                 let cards = usage_cards(&reply, Utc::now());

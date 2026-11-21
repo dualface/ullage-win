@@ -25,7 +25,9 @@ pub const MAX_WINDOWS: usize = 64;
 pub const MAX_MEASUREMENTS_PER_WINDOW: usize = 32;
 /// Readings of the whole reply. Real: at most 68 for one `sub2api` account.
 pub const MAX_MEASUREMENTS: usize = 512;
-/// Bytes of one string of a reply, as UTF-8. Real: at most 32.
+/// Bytes of one of the texts of an account, a window or a reading (ids, names,
+/// labels, codes), as UTF-8. The text of a partial failure is not one of them:
+/// the card model only counts the failures. Real: at most 32.
 pub const MAX_STRING_BYTES: usize = 256;
 /// Characters of one name in the list of hidden metrics: the limit of the
 /// daemon itself (`MAX_METRIC_NAME_CHARACTERS`), which counts characters.

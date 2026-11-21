@@ -366,19 +366,19 @@ mod tests {
 
     #[test]
     fn a_reply_over_the_limits_is_an_invalid_one_and_one_within_them_is_unchanged() {
-        let server = serve(vec![Reply::Raw(ok(&body(ControlResult::Snapshots(
-            oversized_snapshots(),
-        ))))]);
+        // One daemon, one address, one credential: the reply over the limits
+        // does not change what the next fetch gets.
+        let normal = normal_snapshots();
+        let server = serve(vec![
+            Reply::Raw(ok(&body(ControlResult::Snapshots(oversized_snapshots())))),
+            Reply::Raw(ok(&body(ControlResult::Snapshots(normal.clone())))),
+        ]);
+        let store = store_for(server.address.clone());
         assert_eq!(
-            fetch_remote(&store_for(server.address.clone()), &server.address).unwrap_err(),
+            fetch_remote(&store, &server.address).unwrap_err(),
             FailureKind::Fetch(FetchError::InvalidResponse)
         );
-
-        let normal = normal_snapshots();
-        let server = serve(vec![Reply::Raw(ok(&body(ControlResult::Snapshots(
-            normal.clone(),
-        ))))]);
-        let fetched = fetch_remote(&store_for(server.address.clone()), &server.address).unwrap();
+        let fetched = fetch_remote(&store, &server.address).unwrap();
         assert_eq!(fetched.snapshots, normal);
     }
 

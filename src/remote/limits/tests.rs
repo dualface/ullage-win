@@ -165,7 +165,7 @@ fn the_number_of_readings_of_the_reply_is_limited() {
     );
 }
 
-/// For every string a reply holds, one that is `MAX_STRING_BYTES` long is
+/// For every text that the limit applies to, one that is `MAX_STRING_BYTES` long is
 /// within the limit and one a byte longer is over it. The lengths are in
 /// bytes: the long one is also under the limit in characters, so a check by
 /// characters would let it pass.
@@ -250,15 +250,19 @@ fn the_list_of_hidden_metrics_is_limited_in_names_and_in_characters() {
 
     let long = |characters: usize| {
         let mut one = small();
-        one.metrics = vec!["é".repeat(characters)];
+        // Four bytes each: 128 of them are far over the limit of the strings
+        // in bytes, so the limit of a name is the one in characters.
+        one.metrics = vec!["\u{1F600}".repeat(characters)];
         vec![one]
     };
-    // 128 characters are 256 bytes: the limit is not the one of the strings.
-    limit_is_sharp(
-        long(MAX_METRIC_NAME_CHARACTERS),
-        long(MAX_METRIC_NAME_CHARACTERS + 1),
-        "characters of a name",
-    );
+    let ascii = {
+        let mut one = small();
+        one.metrics = vec!["a".repeat(MAX_METRIC_NAME_CHARACTERS + 1)];
+        vec![one]
+    };
+    assert!(within_limits(&long(MAX_METRIC_NAME_CHARACTERS)));
+    assert!(!within_limits(&long(MAX_METRIC_NAME_CHARACTERS + 1)));
+    assert!(!within_limits(&ascii), "129 characters of one byte");
 }
 
 #[test]
@@ -346,8 +350,10 @@ fn a_reply_whose_parts_are_each_within_a_limit_may_be_over_the_expanded_size() {
     assert!(!within_limits(&over));
 }
 
-/// A reply of the largest size: every limit that is a count is reached, and
-/// the expanded size is under its limit. The names of the readings share a
+/// A reply of the largest size in the two counts that the card model cares
+/// for: `MAX_SNAPSHOTS` snapshots and `MAX_MEASUREMENTS` readings (one window
+/// of eight in each snapshot), with an expanded size under its limit. The
+/// other counts are not reached. The names of the readings share a
 /// long prefix of many segments, which is the worst case for the card model:
 /// it drops one segment of the prefix at a time, and copies all names each
 /// time.
@@ -410,8 +416,8 @@ fn the_readme_tells_the_limits_that_the_code_has() {
          account, more than {MAX_MEASUREMENTS_PER_WINDOW} readings in a window or more than \
          {MAX_MEASUREMENTS} readings in all, more than {MAX_METRIC_NAMES} hidden metric names or \
          {MAX_PARTIAL_FAILURES} partial failures in an account, a hidden metric name of more \
-         than {MAX_METRIC_NAME_CHARACTERS} characters, any other text of more than \
-         {MAX_STRING_BYTES} bytes, or more than {} KiB of text",
+         than {MAX_METRIC_NAME_CHARACTERS} characters, an account id, provider, plan, \
+         label, window, reading or unit text of more than {MAX_STRING_BYTES} bytes, or more than {} KiB of text",
         MAX_EXPANDED_BYTES / 1024
     );
     assert!(words(include_str!("../../../README.md")).contains(&told));
