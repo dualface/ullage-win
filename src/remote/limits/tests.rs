@@ -333,21 +333,22 @@ fn a_reply_whose_parts_are_each_within_a_limit_may_be_over_the_expanded_size() {
     // The window name of a reading is the id and the label, and it counts
     // for every reading of the window.
     let name = "n".repeat(MAX_STRING_BYTES);
-    let readings = |count: usize| vec![reading(&name); count];
+    // Windows of 32 readings: half of the limit of a window.
+    let per_window = MAX_MEASUREMENTS_PER_WINDOW / 2;
     let (id, label) = ("i".repeat(MAX_STRING_BYTES), "l".repeat(MAX_STRING_BYTES));
-    let reply = |count: usize| {
-        let windows = (0..count)
-            .map(|_| window(other(&id, &label), readings(MAX_MEASUREMENTS_PER_WINDOW)))
+    let reply = |windows: usize| {
+        let windows = (0..windows)
+            .map(|_| window(other(&id, &label), vec![reading(&name); per_window]))
             .collect();
         vec![snapshot("a1", windows)]
     };
-    // Each reading is 768 bytes: 64 KiB are passed by the 86th.
+    // Each reading is 768 bytes, so 85 of them are the 64 KiB: two windows
+    // (64 readings) are under it and three (96) are over it, with every count
+    // and every string within its own limit.
+    assert!(per_window as u64 * 2 * 768 <= MAX_EXPANDED_BYTES);
+    assert!(per_window as u64 * 3 * 768 > MAX_EXPANDED_BYTES);
     assert!(within_limits(&reply(2)));
-    let over = reply(3);
-    let over_by = 3 * MAX_MEASUREMENTS_PER_WINDOW;
-    assert!(over_by <= MAX_MEASUREMENTS);
-    assert!(over_by as u64 * 768 > MAX_EXPANDED_BYTES);
-    assert!(!within_limits(&over));
+    assert!(!within_limits(&reply(3)));
 }
 
 /// A reply of the largest size in the two counts that the card model cares

@@ -186,7 +186,7 @@ Some points to know:
 - A reply that is larger than any real daemon gives is not shown, and the
   window says that the answer can't be read, as for any other answer it can't
   read. That is a reply with more than 64 accounts, more than 64 windows in an
-  account, more than 32 readings in a window or more than 512 readings in all,
+  account, more than 64 readings in a window or more than 512 readings in all,
   more than 64 hidden metric names or 64 partial failures in an account, a hidden
   metric name of more than 128 characters, an account id, provider, plan,
   label, window, reading or unit text of more than 256 bytes, or more than 64 KiB of text once the name of a window is counted for
