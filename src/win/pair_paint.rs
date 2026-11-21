@@ -10,6 +10,7 @@ use windows::Win32::Foundation::{COLORREF, POINT, RECT};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory, ID2D1Factory,
 };
+use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CombineRgn, CreateFontW, CreateRectRgn,
     CreateSolidBrush, DEFAULT_CHARSET, DeleteObject, GetClipRgn, GetDCOrgEx, GetObjectType,
@@ -242,6 +243,19 @@ pub struct Ui {
     /// The address for which the plain text note has been drawn, so that it
     /// has been on the screen before that address can be paired with.
     pub noted: RefCell<Option<String>>,
+    /// Waits until what was drawn on the window has been put on the screen
+    /// (by the compositor of the desktop), and says whether it has. A drawing
+    /// that went through is not yet on the screen: the compositor puts the
+    /// picture of the window there after it. The tests give another one.
+    pub presenter: Cell<fn() -> bool>,
+}
+
+/// Waits for the next frame of the desktop compositor, which has what was
+/// drawn on the window by then. It is asked once for each drawing, and does
+/// not loop. A compositor that cannot be waited for is not a note that was
+/// seen.
+pub fn wait_for_the_screen() -> bool {
+    unsafe { DwmFlush() }.is_ok()
 }
 
 impl Ui {
@@ -260,6 +274,12 @@ impl Ui {
             hover: Cell::new(None),
             tracking: Cell::new(false),
             noted: RefCell::new(None),
+            // The tests run where no screen is shown, so they cannot wait for
+            // one: they say it was shown, or that it was not.
+            #[cfg(test)]
+            presenter: Cell::new(|| true),
+            #[cfg(not(test))]
+            presenter: Cell::new(wait_for_the_screen),
         })
     }
 
@@ -355,12 +375,14 @@ impl Ui {
         self.draw(hdc, size, &shapes)?;
         // The note is on the screen now, wholly: that address may be paired
         // with. A copy that went through but left the note, or a part of it,
-        // out is not enough.
+        // out is not enough, and neither is one that the compositor of the
+        // desktop has not put on the screen yet (it is waited for once, last).
         if on_screen
             && status(address) == Status::Plaintext
             && frame
                 .note
                 .is_some_and(|note| fully_visible(hdc, to_pixels(note, self.dpi.get())))
+            && (self.presenter.get())()
         {
             *self.noted.borrow_mut() = Some(address.to_owned());
         }

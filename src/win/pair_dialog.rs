@@ -92,6 +92,10 @@ const UISF_HIDEFOCUS: isize = 0x1;
 /// `wparam`.
 #[cfg(test)]
 const TEST_PAINT_WINDOW: u32 = 0x8000 + 0x77;
+/// A message of the tests: the screen is shown (`wparam` 1) or is not (0)
+/// when the compositor is waited for.
+#[cfg(test)]
+const TEST_SET_SCREEN: u32 = 0x8000 + 0x78;
 /// `DWMWA_USE_IMMERSIVE_DARK_MODE`.
 const DARK_TITLE_BAR: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(20);
 
@@ -297,6 +301,14 @@ unsafe extern "system" fn dialog_proc(
         #[cfg(test)]
         TEST_PAINT_WINDOW if shared_of(hwnd).is_some() => {
             draw_dialog_on(hwnd, HDC(wparam.0 as *mut _), true);
+            1
+        }
+        #[cfg(test)]
+        TEST_SET_SCREEN if shared_of(hwnd).is_some() => {
+            if let Some(ui) = shared_of(hwnd).and_then(|shared| ui_of(&shared)) {
+                ui.presenter
+                    .set(if wparam.0 == 0 { || false } else { || true });
+            }
             1
         }
         // The rest have no state to act on before `WM_INITDIALOG`, and are

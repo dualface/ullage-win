@@ -821,3 +821,60 @@ fn a_context_that_cannot_be_drawn_on_notes_nothing() {
         assert_eq!(*ui.noted.borrow(), None);
     }
 }
+
+/// Says whether the screen is shown when the dialog waits for the compositor.
+fn set_screen(dialog: HWND, shown: bool) {
+    unsafe {
+        SendMessageW(
+            dialog,
+            TEST_SET_SCREEN,
+            Some(WPARAM(usize::from(shown))),
+            None,
+        );
+    }
+}
+
+#[test]
+fn a_note_is_seen_only_when_the_compositor_has_put_it_on_the_screen() {
+    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let driver = drive(|dialog| {
+        set_text(dialog, ID_CODE, "abcdef");
+        set_text(dialog, ID_ADDRESS, "center:7878");
+        // The note is drawn on the window, wholly, and the screen is not
+        // shown for it: the press is refused, and what was typed stays.
+        set_screen(dialog, false);
+        paint_on_window(dialog);
+        press(dialog, ID_OK);
+        assert_eq!(
+            (text_of(dialog, ID_ADDRESS), text_of(dialog, ID_CODE)),
+            ("center:7878".to_owned(), "ABC-DEF".to_owned()),
+            "paired before the compositor had put the note on the screen"
+        );
+        // Drawn again and shown: the next press counts.
+        set_screen(dialog, true);
+        paint_on_window(dialog);
+        press(dialog, ID_OK);
+    });
+    let shown = run(HWND::default(), None);
+    driver.join().unwrap();
+    let entry = shown
+        .unwrap()
+        .expect("the press after the screen showed it pairs");
+    assert_eq!(entry.address, "center:7878");
+}
+
+#[test]
+fn the_compositor_can_be_waited_for_once_without_hanging() {
+    use crate::win::pair_paint::wait_for_the_screen;
+    // The answer depends on the session (a session without a screen may have
+    // no compositor to wait for, and then the answer is no): what is asked
+    // here is that it comes, once, and in time.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(wait_for_the_screen());
+    });
+    let answer = receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("waiting for the compositor returns");
+    println!("DWM FLUSH in this session: {answer}");
+}
