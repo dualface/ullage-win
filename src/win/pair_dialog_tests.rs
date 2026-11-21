@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use windows::Win32::Graphics::Gdi::SetTextColor;
 use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
 use windows::core::PCWSTR;
@@ -388,7 +389,7 @@ fn the_window_grows_with_the_status_line_and_the_controls_follow() {
 /// `ULLAGE_DIALOG_SHOTS` names, when it names one. Two pictures are made, one
 /// with `PrintWindow` and one by asking the window to print itself, so that a
 /// session without a screen still gives one of them.
-fn shoot(dialog: HWND, name: &str) {
+fn shoot(dialog: HWND, name: &str, mode: Mode) {
     // `PrintWindow` is in a part of the `windows` crate that the program
     // does not otherwise need, so it is declared here, for the tests only.
     #[link(name = "user32")]
@@ -424,6 +425,9 @@ fn shoot(dialog: HWND, name: &str) {
                 );
             }
         }
+        if !by_print_window {
+            write_address(dialog, &surface, rect, mode);
+        }
         let pixels = surface.pixels_mut();
         // The alpha of a window that is drawn by the system can be 0.
         for pixel in pixels.as_chunks_mut::<4>().0 {
@@ -448,6 +452,36 @@ fn shoot(dialog: HWND, name: &str) {
     }
 }
 
+/// A single-line edit control does not answer `WM_PRINT` in a session that has
+/// no screen (a multi-line one does), so the text of the address box is drawn
+/// into the picture by the test, in the font and the colour of the box, where
+/// the box is. This is the one part of a picture that the test draws.
+fn write_address(dialog: HWND, surface: &crate::win::surface::Surface, window: RECT, mode: Mode) {
+    use windows::Win32::Graphics::Gdi::{HGDIOBJ, SelectObject, SetBkMode, TRANSPARENT, TextOutW};
+    const WM_GETFONT: u32 = 0x0031;
+    let Ok(edit) = (unsafe { GetDlgItem(Some(dialog), ID_ADDRESS.into()) }) else {
+        return;
+    };
+    let mut at = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(edit, &mut at);
+    }
+    let font = unsafe { SendMessageW(edit, WM_GETFONT, None, None) }.0;
+    let text: Vec<u16> = text_of(dialog, ID_ADDRESS).encode_utf16().collect();
+    unsafe {
+        let previous = SelectObject(surface.hdc, HGDIOBJ(font as *mut _));
+        SetBkMode(surface.hdc, TRANSPARENT);
+        SetTextColor(surface.hdc, colorref(mode, Role::Text));
+        let _ = TextOutW(
+            surface.hdc,
+            at.left - window.left,
+            at.top - window.top,
+            &text,
+        );
+        SelectObject(surface.hdc, previous);
+    }
+}
+
 /// One picture of the dialog in a state. It writes files only when
 /// `ULLAGE_DIALOG_SHOTS` is set; the dialog is shown either way.
 fn picture(name: &'static str, mode: Mode, address: &'static str, code: &'static str) {
@@ -461,7 +495,7 @@ fn picture(name: &'static str, mode: Mode, address: &'static str, code: &'static
         focus(dialog, ID_OK);
         // The dialog draws on the thread that shows it; give it a moment.
         thread::sleep(Duration::from_millis(300));
-        shoot(dialog, name);
+        shoot(dialog, name, mode);
         click(dialog, ID_CANCEL);
     });
     let shown = run_with_mode(HWND::default(), None, mode);
