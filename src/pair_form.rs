@@ -40,6 +40,7 @@ const DS_MODALFRAME: u32 = 0x80;
 const SS_LEFT: u32 = 0;
 const SS_NOPREFIX: u32 = 0x80;
 const ES_MULTILINE: u32 = 0x4;
+const ES_AUTOVSCROLL: u32 = 0x40;
 const ES_AUTOHSCROLL: u32 = 0x80;
 const BS_PUSHBUTTON: u32 = 0;
 const BS_DEFPUSHBUTTON: u32 = 1;
@@ -112,7 +113,9 @@ fn controls() -> [Control; 8] {
             // not taken by it (no `ES_WANTRETURN`) and so reaches the default
             // button, and the line breaks are dropped with the other
             // characters that a code does not have.
-            style: edit | ES_MULTILINE,
+            // `ES_AUTOVSCROLL`: a multi-line box without it refuses text that
+            // needs more lines than the box shows, so the paste would be lost.
+            style: edit | ES_MULTILINE | ES_AUTOVSCROLL,
             ex_style: WS_EX_CLIENTEDGE,
             rect: (10, 66, 80, 14),
             id: ID_CODE,
@@ -391,6 +394,7 @@ mod tests {
         const ES_WANTRETURN: u32 = 0x1000;
         assert_eq!(find(ID_ADDRESS).style & ES_MULTILINE, 0);
         assert_eq!(find(ID_CODE).style & ES_MULTILINE, ES_MULTILINE);
+        assert_eq!(find(ID_CODE).style & ES_AUTOVSCROLL, ES_AUTOVSCROLL);
         for id in [ID_ADDRESS, ID_CODE] {
             assert_eq!(find(id).style & ES_WANTRETURN, 0, "{id}");
         }
