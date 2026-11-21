@@ -43,7 +43,6 @@ use super::text::Typography;
 use super::tray::{self, WM_TRAY};
 use super::util::{hiword, loword, pcwstr, wide, x_of, y_of};
 use crate::contract::{QUIT_MESSAGE, SHOW_MESSAGE, WINDOW_CLASS};
-use crate::pair_form::plaintext_question;
 use crate::placement::Edges;
 use crate::prefs::{Prefs, load, prefs_path};
 use crate::remote::address::RemoteAddress;
@@ -377,11 +376,8 @@ fn pair_from_dialog(cell: &RefCell<App>, hwnd: HWND, prefill: Option<&str>) {
         );
         return;
     };
-    if let Some(question) = plaintext_question(&address)
-        && !dialog::confirm(hwnd, &question)
-    {
-        return;
-    }
+    // A path that is not encrypted was said so in the dialog, and the main
+    // button said `Pair anyway`: pressing it was the user's word.
     if let Ok(mut app) = cell.try_borrow_mut() {
         app.begin_pairing(address, code);
     }

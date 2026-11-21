@@ -1,48 +1,97 @@
 //! The pairing dialog: a box for the address of a remote daemon and a box
-//! for the pairing code. What may be typed, and what OK needs, is decided by
-//! `remote::pairing` and `pair_form`; this module only puts it on the screen.
+//! for the pairing code. What may be typed, and what the main button needs, is
+//! decided by `remote::pairing` and `scene::pair`; this module puts it on the
+//! screen, with the controls of the system and the look of `scene::pair`.
 //!
 //! The dialog is modal and runs its own message loop, so it is shown only
 //! while the app is not borrowed, like a menu or a message box.
+//!
+//! Every message that reaches the dialog or a control of it, from this
+//! process or from another, is handled with the state of this thread, found
+//! by the handle of the window. A message parameter that is a pointer is
+//! never followed: `WM_INITDIALOG` and the colour messages read none, and
+//! the buttons are the system's, so there is no `WM_DRAWITEM`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    BeginPaint, EndPaint, GetMonitorInfoW, GetObjectType, HDC, HGDIOBJ, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT, RDW_ALLCHILDREN,
+    RDW_INVALIDATE, RedrawWindow, SetBkColor, SetTextColor,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, IsWindowEnabled, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, DLGTEMPLATE, DefWindowProcW, DialogBoxIndirectParamW, EN_CHANGE, EndDialog,
-    GWLP_WNDPROC, GetDlgItem, GetDlgItemTextW, GetParent, GetWindowLongPtrW, GetWindowRect,
-    SWP_NOSIZE, SWP_NOZORDER, SendDlgItemMessageW, SetDlgItemTextW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, WM_CLOSE, WM_COMMAND, WM_INITDIALOG,
+    CallWindowProcW, DLGTEMPLATE, DWLP_MSGRESULT, DefWindowProcW, DialogBoxIndirectParamW,
+    EN_CHANGE, EndDialog, GWL_EXSTYLE, GWL_STYLE, GWLP_WNDPROC, GetClientRect, GetDlgCtrlID,
+    GetDlgItem, GetDlgItemTextW, GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendDlgItemMessageW, SendMessageW,
+    SetDlgItemTextW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, WINDOW_LONG_PTR_INDEX,
+    WM_CLOSE, WM_COMMAND, WM_INITDIALOG,
 };
 
+use super::pair_paint::{Ui, colorref};
+use super::registry;
 use super::util::{hiword, loword, pcwstr, wide};
 use crate::pair_form::{
-    ADDRESS_LIMIT, CODE_LIMIT, ID_ADDRESS, ID_ADDRESS_NOTE, ID_CANCEL, ID_CODE, ID_OK,
-    address_note, template,
+    ADDRESS_LIMIT, CODE_LIMIT, ID_ADDRESS, ID_ADDRESS_LABEL, ID_CANCEL, ID_CODE, ID_CODE_LABEL,
+    ID_OK, template,
 };
 use crate::remote::pairing::{can_submit, format_pair_code_input};
+use crate::scene::Rect;
+use crate::scene::pair::{
+    ButtonState, Focus, Kind, Model, frame, primary_label, status, to_pixels,
+};
+use crate::theme::{Mode, Role};
 
-// Messages of an edit control, from `winuser.h`. The `Win32_UI_Controls`
-// feature that holds them is not otherwise needed.
+// Messages and notifications of the controls, and of windows, from
+// `winuser.h`. The `Win32_UI_Controls` feature that holds some of them is not
+// otherwise needed.
 const EM_SETSEL: u32 = 0x00B1;
 const EM_LIMITTEXT: u32 = 0x00C5;
 const EM_REPLACESEL: u32 = 0x00C2;
 const EM_UNDO: u32 = 0x00C7;
+const EN_SETFOCUS: u32 = 0x0100;
+const EN_KILLFOCUS: u32 = 0x0200;
+const BM_GETSTATE: u32 = 0x00F2;
+const BST_PUSHED: isize = 0x4;
+const BST_FOCUS: isize = 0x8;
 const WM_SETTEXT: u32 = 0x000C;
+const WM_SETFONT: u32 = 0x0030;
+const WM_ENABLE: u32 = 0x000A;
+const WM_ERASEBKGND: u32 = 0x0014;
+const WM_PAINT: u32 = 0x000F;
+const WM_SETTINGCHANGE: u32 = 0x001A;
+const WM_CTLCOLOREDIT: u32 = 0x0133;
+const WM_CTLCOLORSTATIC: u32 = 0x0138;
 const WM_KEYDOWN: u32 = 0x0100;
+const WM_KEYUP: u32 = 0x0101;
 const WM_CHAR: u32 = 0x0102;
+const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
+const WM_CAPTURECHANGED: u32 = 0x0215;
+const WM_MOUSELEAVE: u32 = 0x02A3;
+const WM_PRINTCLIENT: u32 = 0x0318;
+const WM_QUERYUISTATE: u32 = 0x0129;
+const WM_UPDATEUISTATE: u32 = 0x0128;
 const WM_CUT: u32 = 0x0300;
 const WM_PASTE: u32 = 0x0302;
 const WM_CLEAR: u32 = 0x0303;
 const WM_UNDO: u32 = 0x0304;
+const WM_DPICHANGED: u32 = 0x02E0;
+const BM_SETSTATE: u32 = 0x00F3;
+const UISF_HIDEFOCUS: isize = 0x1;
+/// `DWMWA_USE_IMMERSIVE_DARK_MODE`.
+const DARK_TITLE_BAR: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(20);
 
-/// What the user typed when they pressed OK.
+/// What the user typed when they pressed the main button.
 pub struct Entry {
     pub address: String,
     pub code: String,
@@ -56,6 +105,11 @@ struct Shared {
     prefill: String,
     /// The owner, for the monitor the dialog is placed on.
     owner: HWND,
+    /// A mode to use instead of the system's, for the tests that take a
+    /// picture of each.
+    forced_mode: Option<Mode>,
+    /// What the dialog draws with, made when it opens.
+    ui: RefCell<Option<Rc<Ui>>>,
     /// Set while the code box is rewritten, so that its own change is not
     /// formatted again.
     formatting: Cell<bool>,
@@ -82,8 +136,8 @@ enum State {
 struct Open {
     dialog: HWND,
     shared: Rc<Shared>,
-    /// The window procedure of the code box before it was replaced.
-    code_box_original: isize,
+    /// The window procedures that were replaced, by the handle of the control.
+    originals: Vec<(isize, isize)>,
 }
 
 thread_local! {
@@ -91,13 +145,28 @@ thread_local! {
 }
 
 /// The state of the open dialog `hwnd`, when `hwnd` is the dialog.
-fn open_of(hwnd: HWND) -> Option<(Rc<Shared>, isize)> {
+fn shared_of(hwnd: HWND) -> Option<Rc<Shared>> {
     STATE.with_borrow(|state| match state {
-        State::Open(open) if open.dialog == hwnd => {
-            Some((open.shared.clone(), open.code_box_original))
-        }
+        State::Open(open) if open.dialog == hwnd => Some(open.shared.clone()),
         _ => None,
     })
+}
+
+/// The window procedure that the control `control` of the dialog had before
+/// it was replaced.
+fn original_of(dialog: HWND, control: HWND) -> Option<isize> {
+    STATE.with_borrow(|state| match state {
+        State::Open(open) if open.dialog == dialog => open
+            .originals
+            .iter()
+            .find(|(handle, _)| *handle == control.0 as isize)
+            .map(|(_, original)| *original),
+        _ => None,
+    })
+}
+
+fn ui_of(shared: &Shared) -> Option<Rc<Ui>> {
+    shared.ui.borrow().clone()
 }
 
 /// Shows the dialog over `owner` and waits for it to close. `None` is a
@@ -105,6 +174,24 @@ fn open_of(hwnd: HWND) -> Option<(Rc<Shared>, isize)> {
 /// That only one dialog is open at a time is the caller's to see to: the
 /// dialog disables the window, but the tray icon still reaches it.
 pub fn run(owner: HWND, prefill: Option<&str>) -> Result<Option<Entry>, Failed> {
+    run_in(owner, prefill, None)
+}
+
+/// [`run`] in the colours of `mode`, whatever the system uses.
+#[cfg(test)]
+pub fn run_with_mode(
+    owner: HWND,
+    prefill: Option<&str>,
+    mode: Mode,
+) -> Result<Option<Entry>, Failed> {
+    run_in(owner, prefill, Some(mode))
+}
+
+fn run_in(
+    owner: HWND,
+    prefill: Option<&str>,
+    forced_mode: Option<Mode>,
+) -> Result<Option<Entry>, Failed> {
     // A template must start at a multiple of four bytes, which a `Vec<u8>`
     // does not promise.
     let bytes = template();
@@ -115,6 +202,8 @@ pub fn run(owner: HWND, prefill: Option<&str>) -> Result<Option<Entry>, Failed> 
     let shared = Rc::new(Shared {
         prefill: prefill.unwrap_or_default().to_owned(),
         owner,
+        forced_mode,
+        ui: RefCell::new(None),
         formatting: Cell::new(false),
         editing: Cell::new(false),
         entry: RefCell::new(None),
@@ -156,15 +245,19 @@ pub fn run(owner: HWND, prefill: Option<&str>) -> Result<Option<Entry>, Failed> 
     Ok(entry)
 }
 
-fn shared_of(hwnd: HWND) -> Option<Rc<Shared>> {
-    open_of(hwnd).map(|(shared, _)| shared)
+/// Sets the result that a dialog procedure gives for a message it handled.
+fn answer(hwnd: HWND, result: isize) -> isize {
+    unsafe {
+        SetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(DWLP_MSGRESULT as i32), result);
+    }
+    1
 }
 
 unsafe extern "system" fn dialog_proc(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
-    _lparam: LPARAM,
+    lparam: LPARAM,
 ) -> isize {
     match message {
         WM_INITDIALOG => {
@@ -179,16 +272,54 @@ unsafe extern "system" fn dialog_proc(
                 *state = State::Open(Open {
                     dialog: hwnd,
                     shared: shared.clone(),
-                    code_box_original: 0,
+                    originals: Vec::new(),
                 });
                 Some(shared)
             });
             let Some(shared) = shared else {
                 return 0;
             };
-            initialize(hwnd, &shared);
-            // The focus is set here, so the dialog manager must not.
+            if initialize(hwnd, &shared).is_err() {
+                unsafe {
+                    let _ = EndDialog(hwnd, -1);
+                }
+            }
+            // The focus is set there, so the dialog manager must not.
             0
+        }
+        // The rest have no state to act on before `WM_INITDIALOG`, and are
+        // left to the default procedure then.
+        WM_ERASEBKGND if shared_of(hwnd).is_some() => answer(hwnd, 1),
+        WM_PAINT if shared_of(hwnd).is_some() => {
+            paint_dialog(hwnd, None);
+            1
+        }
+        // `wparam` is the device context to draw on. It is only used as the
+        // target of drawing, after it is checked to be one.
+        WM_PRINTCLIENT if shared_of(hwnd).is_some() => {
+            paint_dialog(hwnd, Some(HDC(wparam.0 as *mut _)));
+            answer(hwnd, 0)
+        }
+        // `lparam` is the control that is asked about. It is compared with
+        // the handles of the controls of this dialog, and read no further.
+        WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => color_of_control(hwnd, message, wparam, lparam),
+        WM_SETTINGCHANGE => {
+            if let Some(shared) = shared_of(hwnd) {
+                restyle_for_system(hwnd, &shared);
+            }
+            0
+        }
+        // Only the DPI that is in `wparam` is used. The rectangle that
+        // `lparam` points to is not read: the layout is made again.
+        WM_DPICHANGED => {
+            if let Some(shared) = shared_of(hwnd)
+                && let Some(ui) = ui_of(&shared)
+            {
+                ui.restyle(ui.mode(), u32::from(loword(wparam.0 as isize) as u16));
+                dress_controls(hwnd, &ui);
+                layout(hwnd, &ui);
+            }
+            1
         }
         WM_COMMAND => {
             // Messages that come before `WM_INITDIALOG` have no state to act on.
@@ -201,6 +332,9 @@ unsafe extern "system" fn dialog_proc(
                 (ID_ADDRESS, EN_CHANGE) => refresh(hwnd),
                 (ID_CODE, EN_CHANGE) if shared.editing.get() => refresh(hwnd),
                 (ID_CODE, EN_CHANGE) => code_changed(hwnd, &shared),
+                (ID_ADDRESS, EN_SETFOCUS) => focus_changed(hwnd, &shared, Focus::Address),
+                (ID_CODE, EN_SETFOCUS) => focus_changed(hwnd, &shared, Focus::Code),
+                (ID_ADDRESS | ID_CODE, EN_KILLFOCUS) => focus_changed(hwnd, &shared, Focus::None),
                 // `BN_CLICKED`, which is also what Enter and Esc send.
                 (ID_OK, 0) => accept(hwnd, &shared),
                 (ID_CANCEL, 0) => cancel(hwnd),
@@ -231,9 +365,11 @@ unsafe extern "system" fn code_box_proc(
     // The state of the dialog, found by the handle of the dialog, and the
     // edit control's own procedure, kept in it. Without them the message is
     // left to the default procedure.
-    let found = unsafe { GetParent(hwnd) }
-        .ok()
-        .and_then(|dialog| open_of(dialog).map(|(shared, original)| (dialog, shared, original)));
+    let found = unsafe { GetParent(hwnd) }.ok().and_then(|dialog| {
+        let shared = shared_of(dialog)?;
+        let original = original_of(dialog, hwnd)?;
+        Some((dialog, shared, original))
+    });
     let Some((dialog, shared, original)) = found else {
         return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
     };
@@ -265,7 +401,279 @@ const CHANGES_TEXT: [u32; 9] = [
     EM_UNDO,
 ];
 
-fn initialize(hwnd: HWND, shared: &Shared) {
+/// Which button a control is, and `None` for a control that is not one.
+fn kind_of(button: HWND) -> Option<Kind> {
+    match unsafe { GetDlgCtrlID(button) } {
+        id if id == i32::from(ID_OK) => Some(Kind::Primary),
+        id if id == i32::from(ID_CANCEL) => Some(Kind::Secondary),
+        _ => None,
+    }
+}
+
+/// The window procedure of a button: the system's own, but it is drawn by
+/// `scene::pair`. The state it is drawn in is read from the button itself
+/// (`BM_GETSTATE`, enabled or not) and from the dialog's own state, and no
+/// message parameter is followed.
+unsafe extern "system" fn button_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let found = unsafe { GetParent(hwnd) }.ok().and_then(|dialog| {
+        let shared = shared_of(dialog)?;
+        let original = original_of(dialog, hwnd)?;
+        Some((shared, original))
+    });
+    let Some((shared, original)) = found else {
+        return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
+    };
+    let ui = ui_of(&shared);
+    match message {
+        WM_ERASEBKGND => return LRESULT(1),
+        WM_PAINT => {
+            paint_button(hwnd, ui.as_deref(), None);
+            return LRESULT(0);
+        }
+        WM_PRINTCLIENT => {
+            paint_button(hwnd, ui.as_deref(), Some(HDC(wparam.0 as *mut _)));
+            return LRESULT(0);
+        }
+        WM_MOUSEMOVE => {
+            if let Some(ui) = &ui {
+                let kind = kind_of(hwnd);
+                if ui.hover.get() != kind {
+                    ui.hover.set(kind);
+                    invalidate(hwnd);
+                }
+                if !ui.tracking.get() {
+                    let mut track = TRACKMOUSEEVENT {
+                        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    if unsafe { TrackMouseEvent(&mut track) }.is_ok() {
+                        ui.tracking.set(true);
+                    }
+                }
+            }
+        }
+        WM_MOUSELEAVE => {
+            if let Some(ui) = &ui {
+                ui.tracking.set(false);
+                ui.hover.set(None);
+            }
+            invalidate(hwnd);
+            return LRESULT(0);
+        }
+        _ => {}
+    }
+    // SAFETY: the value was the window procedure of the button when the
+    // dialog was set up, which is a function with this signature.
+    let original: windows::Win32::UI::WindowsAndMessaging::WNDPROC =
+        unsafe { std::mem::transmute(original) };
+    let result = unsafe { CallWindowProcW(original, hwnd, message, wparam, lparam) };
+    // Anything that can change how the button looks.
+    if matches!(
+        message,
+        WM_SETTEXT
+            | WM_ENABLE
+            | BM_SETSTATE
+            | WM_UPDATEUISTATE
+            | WM_LBUTTONDOWN
+            | WM_LBUTTONUP
+            | WM_CAPTURECHANGED
+            | WM_KEYDOWN
+            | WM_KEYUP
+    ) || matches!(message, 0x0007 | 0x0008)
+    {
+        invalidate(hwnd);
+    }
+    result
+}
+
+fn invalidate(hwnd: HWND) {
+    unsafe {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
+fn client_pixels(hwnd: HWND) -> (i32, i32) {
+    let mut rect = RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut rect);
+    }
+    (rect.right - rect.left, rect.bottom - rect.top)
+}
+
+fn paint_button(hwnd: HWND, ui: Option<&Ui>, on: Option<HDC>) {
+    let mut paint = PAINTSTRUCT::default();
+    let hdc = match on {
+        Some(hdc) => hdc,
+        None => unsafe { BeginPaint(hwnd, &mut paint) },
+    };
+    if let (Some(ui), Some(kind)) = (ui, kind_of(hwnd))
+        && unsafe { GetObjectType(HGDIOBJ(hdc.0)) } != 0
+    {
+        let flags = unsafe { SendMessageW(hwnd, BM_GETSTATE, None, None) }.0;
+        // A dialog hides the focus ring until the keyboard is used.
+        let ui_state = unsafe { SendMessageW(hwnd, WM_QUERYUISTATE, None, None) }.0;
+        let mut label = [0u16; 64];
+        let length = unsafe { GetWindowTextW(hwnd, &mut label) } as usize;
+        let label = String::from_utf16_lossy(&label[..length.min(64)]);
+        let state = ButtonState {
+            hover: ui.hover.get() == Some(kind),
+            pressed: flags & BST_PUSHED != 0,
+            disabled: !unsafe { IsWindowEnabled(hwnd) }.as_bool(),
+            focus_ring: flags & BST_FOCUS != 0 && ui_state & UISF_HIDEFOCUS == 0,
+        };
+        let _ = ui.draw_button(hdc, client_pixels(hwnd), kind, state, &label);
+    }
+    if on.is_none() {
+        unsafe {
+            let _ = EndPaint(hwnd, &paint);
+        }
+    }
+}
+
+fn paint_dialog(hwnd: HWND, on: Option<HDC>) {
+    let mut paint = PAINTSTRUCT::default();
+    let hdc = match on {
+        Some(hdc) => hdc,
+        None => unsafe { BeginPaint(hwnd, &mut paint) },
+    };
+    // No borrow is held while drawing: the state is cloned out first.
+    if let Some(shared) = shared_of(hwnd)
+        && let Some(ui) = ui_of(&shared)
+        && unsafe { GetObjectType(HGDIOBJ(hdc.0)) } != 0
+    {
+        let _ = ui.draw_dialog(hdc, client_pixels(hwnd), &text_of(hwnd, ID_ADDRESS));
+    }
+    if on.is_none() {
+        unsafe {
+            let _ = EndPaint(hwnd, &paint);
+        }
+    }
+}
+
+/// The colour of the controls that the dialog colours: the two boxes (text on
+/// the colour of their frame) and the two labels (on the dialog's).
+fn color_of_control(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> isize {
+    let Some(shared) = shared_of(hwnd) else {
+        return 0;
+    };
+    let Some(ui) = ui_of(&shared) else {
+        return 0;
+    };
+    let control = lparam.0;
+    let is = |id: u16| {
+        unsafe { GetDlgItem(Some(hwnd), id.into()) }.is_ok_and(|item| item.0 as isize == control)
+    };
+    let hdc = HDC(wparam.0 as *mut _);
+    let mode = ui.mode();
+    if message == WM_CTLCOLOREDIT && (is(ID_ADDRESS) || is(ID_CODE)) {
+        unsafe {
+            SetTextColor(hdc, colorref(mode, Role::Text));
+            SetBkColor(hdc, colorref(mode, Role::Card));
+        }
+        return ui.card_brush().0 as isize;
+    }
+    if message == WM_CTLCOLORSTATIC && (is(ID_ADDRESS_LABEL) || is(ID_CODE_LABEL)) {
+        unsafe {
+            SetTextColor(hdc, colorref(mode, Role::Faint));
+            SetBkColor(hdc, colorref(mode, Role::Win));
+        }
+        return ui.win_brush().0 as isize;
+    }
+    0
+}
+
+fn focus_changed(hwnd: HWND, shared: &Shared, focus: Focus) {
+    if let Some(ui) = ui_of(shared) {
+        ui.focus.set(focus);
+        invalidate(hwnd);
+    }
+}
+
+/// The mode the dialog is drawn in: the system's, unless a test sets one.
+fn mode_now(shared: &Shared) -> Mode {
+    shared.forced_mode.unwrap_or_else(registry::apps_mode)
+}
+
+/// The system changed a setting: draw in the new mode when it is another.
+fn restyle_for_system(hwnd: HWND, shared: &Shared) {
+    let Some(ui) = ui_of(shared) else {
+        return;
+    };
+    let mode = mode_now(shared);
+    if mode == ui.mode() {
+        return;
+    }
+    ui.restyle(mode, ui.dpi());
+    dark_title_bar(hwnd, mode);
+    dress_controls(hwnd, &ui);
+    unsafe {
+        let _ = RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_ALLCHILDREN);
+    }
+}
+
+/// A dark title bar in the dark mode. A system that does not know the
+/// attribute leaves it light.
+fn dark_title_bar(hwnd: HWND, mode: Mode) {
+    let on: i32 = (mode == Mode::Dark).into();
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DARK_TITLE_BAR,
+            (&on as *const i32).cast(),
+            size_of::<i32>() as u32,
+        );
+    }
+}
+
+/// The fonts of the controls.
+fn dress_controls(hwnd: HWND, ui: &Ui) {
+    let fonts = [
+        (ID_ADDRESS_LABEL, ui.label_font()),
+        (ID_ADDRESS, ui.edit_font()),
+        (ID_CODE_LABEL, ui.label_font()),
+        (ID_CODE, ui.code_font()),
+        (ID_OK, ui.edit_font()),
+        (ID_CANCEL, ui.edit_font()),
+    ];
+    for (id, font) in fonts {
+        unsafe {
+            SendDlgItemMessageW(
+                hwnd,
+                id.into(),
+                WM_SETFONT,
+                WPARAM(font.0 as usize),
+                LPARAM(1),
+            );
+        }
+    }
+}
+
+/// The DPI of the screen the window is on, 96 when it is not known.
+fn dpi_of(hwnd: HWND) -> u32 {
+    match unsafe { GetDpiForWindow(hwnd) } {
+        0 => 96,
+        dpi => dpi,
+    }
+}
+
+fn initialize(hwnd: HWND, shared: &Rc<Shared>) -> Result<(), Failed> {
+    let mode = mode_now(shared);
+    // The dialog is first laid out for the DPI of the owner, and then, when
+    // it has been moved to the owner's screen, for the DPI of its own.
+    let first = if shared.owner.0.is_null() {
+        dpi_of(hwnd)
+    } else {
+        dpi_of(shared.owner)
+    };
+    let ui = Rc::new(Ui::new(mode, first).map_err(|_| Failed)?);
+    *shared.ui.borrow_mut() = Some(ui.clone());
     unsafe {
         SendDlgItemMessageW(
             hwnd,
@@ -283,19 +691,23 @@ fn initialize(hwnd: HWND, shared: &Shared) {
         );
         let prefill = wide(&shared.prefill);
         let _ = SetDlgItemTextW(hwnd, ID_ADDRESS.into(), pcwstr(&prefill));
-        // The code box formats what is typed or pasted as soon as it is.
-        if let Ok(code) = GetDlgItem(Some(hwnd), ID_CODE.into()) {
-            let original = GetWindowLongPtrW(code, GWLP_WNDPROC);
-            STATE.with_borrow_mut(|state| {
-                if let State::Open(open) = state {
-                    open.code_box_original = original;
-                }
-            });
-            SetWindowLongPtrW(code, GWLP_WNDPROC, code_box_proc as *const () as isize);
-        }
     }
+    // The code box formats what is typed or pasted as soon as it is, and the
+    // buttons are drawn by the dialog.
+    subclass(hwnd, ID_CODE, code_box_proc as *const () as isize);
+    subclass(hwnd, ID_OK, button_proc as *const () as isize);
+    subclass(hwnd, ID_CANCEL, button_proc as *const () as isize);
+    dark_title_bar(hwnd, mode);
+    dress_controls(hwnd, &ui);
     refresh(hwnd);
     center_on_owner(hwnd, shared.owner);
+    // On another screen, the DPI can be another.
+    let own = dpi_of(hwnd);
+    if own != ui.dpi() {
+        ui.restyle(mode, own);
+        dress_controls(hwnd, &ui);
+        layout(hwnd, &ui);
+    }
     unsafe {
         let _ = SetForegroundWindow(hwnd);
         // Typing starts in the box that is still empty.
@@ -308,6 +720,81 @@ fn initialize(hwnd: HWND, shared: &Shared) {
             let _ = SetFocus(Some(target));
         }
     }
+    Ok(())
+}
+
+/// Replaces the window procedure of the control `id`, and keeps the old one.
+fn subclass(dialog: HWND, id: u16, procedure: isize) {
+    unsafe {
+        let Ok(control) = GetDlgItem(Some(dialog), id.into()) else {
+            return;
+        };
+        let original = GetWindowLongPtrW(control, GWLP_WNDPROC);
+        STATE.with_borrow_mut(|state| {
+            if let State::Open(open) = state {
+                open.originals.push((control.0 as isize, original));
+            }
+        });
+        SetWindowLongPtrW(control, GWLP_WNDPROC, procedure);
+    }
+}
+
+/// Puts every control where `scene::pair` wants it, for the text in the
+/// address box, and makes the window the size that fits.
+fn layout(hwnd: HWND, ui: &Ui) {
+    let model = Model {
+        address: text_of(hwnd, ID_ADDRESS),
+        focus: ui.focus.get(),
+    };
+    let frame = frame(&model, ui.typography());
+    let dpi = ui.dpi();
+    let (width, height, _, _) = to_pixels(Rect::new(0.0, 0.0, frame.size.0, frame.size.1), dpi);
+    unsafe {
+        // The outer size is the size of the client area, and the frame and
+        // the title bar of the dialog at this DPI.
+        let mut outer = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let _ = AdjustWindowRectExForDpi(
+            &mut outer,
+            windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(style),
+            false,
+            windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE(ex_style),
+            dpi,
+        );
+        if client_pixels(hwnd) != (width, height) {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                outer.right - outer.left,
+                outer.bottom - outer.top,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        let places = [
+            (ID_ADDRESS_LABEL, frame.address_label),
+            (ID_ADDRESS, frame.address_edit),
+            (ID_CODE_LABEL, frame.code_label),
+            (ID_CODE, frame.code_edit),
+            (ID_OK, frame.primary),
+            (ID_CANCEL, frame.cancel),
+        ];
+        for (id, rect) in places {
+            if let Ok(control) = GetDlgItem(Some(hwnd), id.into()) {
+                let (x, y, w, h) = to_pixels(rect, dpi);
+                let _ = SetWindowPos(control, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
+    }
+    ui.size.set(frame.size);
+    invalidate(hwnd);
 }
 
 /// `DS_CENTER` centers on the monitor of the cursor or the primary one. The
@@ -344,16 +831,28 @@ fn set_text(hwnd: HWND, id: u16, text: &str) {
     }
 }
 
-/// The line under the address, and whether OK may be pressed.
+/// The line under the address and the label of the main button follow the
+/// address, the main button works when the input is whole, and the dialog is
+/// drawn again.
 fn refresh(hwnd: HWND) {
     let address = text_of(hwnd, ID_ADDRESS);
     let code = text_of(hwnd, ID_CODE);
-    set_text(hwnd, ID_ADDRESS_NOTE, &address_note(&address));
     unsafe {
         if let Ok(ok) = GetDlgItem(Some(hwnd), ID_OK.into()) {
             let _ = EnableWindow(ok, can_submit(&address, &code));
         }
     }
+    let Some(shared) = shared_of(hwnd) else {
+        return;
+    };
+    let Some(ui) = ui_of(&shared) else {
+        return;
+    };
+    let label = primary_label(&status(&address));
+    if text_of(hwnd, ID_OK) != label {
+        set_text(hwnd, ID_OK, label);
+    }
+    layout(hwnd, &ui);
 }
 
 /// Makes what was typed or pasted in the code box into the form of a code.
@@ -385,7 +884,7 @@ fn code_changed(hwnd: HWND, shared: &Shared) {
 fn accept(hwnd: HWND, shared: &Shared) {
     let address = text_of(hwnd, ID_ADDRESS);
     let code = text_of(hwnd, ID_CODE);
-    // The default button is disabled until the input is good, but Enter can
+    // The main button is disabled until the input is good, but Enter can
     // still reach here: the check is made again.
     if !can_submit(&address, &code) {
         return;
@@ -416,243 +915,5 @@ fn clear(hwnd: HWND, shared: &Shared) {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Mutex;
-    use std::thread;
-    use std::time::{Duration, Instant};
-
-    use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, SendMessageW};
-    use windows::core::PCWSTR;
-
-    use super::*;
-    use crate::pair_form::TITLE;
-
-    /// The dialog is one per process, so the tests take turns.
-    static TURN: Mutex<()> = Mutex::new(());
-
-    /// The dialog is driven from another thread, the way a user would from
-    /// the keyboard: the dialog runs on the thread of the test.
-    fn find_dialog() -> HWND {
-        let title = wide(TITLE);
-        let started = Instant::now();
-        loop {
-            let found = unsafe { FindWindowW(PCWSTR::null(), pcwstr(&title)) };
-            if let Ok(hwnd) = found {
-                return hwnd;
-            }
-            assert!(started.elapsed() < Duration::from_secs(10), "no dialog");
-            thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    fn enabled(hwnd: HWND, id: u16) -> bool {
-        let item = unsafe { GetDlgItem(Some(hwnd), id.into()) }.unwrap();
-        unsafe { IsWindowEnabled(item) }.as_bool()
-    }
-
-    /// What the box takes at most, and where the caret is.
-    fn limit_of(hwnd: HWND, id: u16) -> usize {
-        const EM_GETLIMITTEXT: u32 = 0x00D5;
-        unsafe { SendDlgItemMessageW(hwnd, id.into(), EM_GETLIMITTEXT, WPARAM(0), LPARAM(0)) }.0
-            as usize
-    }
-
-    /// The end of the selection, which is the caret when nothing is selected.
-    fn caret_of(hwnd: HWND, id: u16) -> usize {
-        const EM_GETSEL: u32 = 0x00B0;
-        let packed =
-            unsafe { SendDlgItemMessageW(hwnd, id.into(), EM_GETSEL, WPARAM(0), LPARAM(0)) }.0;
-        (packed >> 16) as usize & 0xFFFF
-    }
-
-    /// Types one character into the box, as the keyboard does.
-    fn type_key(hwnd: HWND, id: u16, key: char) {
-        unsafe {
-            SendDlgItemMessageW(hwnd, id.into(), WM_CHAR, WPARAM(key as usize), LPARAM(0));
-        }
-    }
-
-    /// Selects `from..to` in the box.
-    fn select(hwnd: HWND, id: u16, from: usize, to: usize) {
-        unsafe {
-            SendDlgItemMessageW(
-                hwnd,
-                id.into(),
-                EM_SETSEL,
-                WPARAM(from),
-                LPARAM(to as isize),
-            );
-        }
-    }
-
-    /// Pastes `text` from the clipboard into the box, as Ctrl+V does.
-    fn paste(hwnd: HWND, id: u16, text: &str) {
-        crate::win::clipboard::set_text(HWND::default(), text).unwrap();
-        unsafe {
-            SendDlgItemMessageW(hwnd, id.into(), WM_PASTE, WPARAM(0), LPARAM(0));
-        }
-    }
-
-    fn click(hwnd: HWND, id: u16) {
-        unsafe {
-            PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(usize::from(id)), LPARAM(0)).unwrap();
-        }
-    }
-
-    // The values are in `Send` form: a raw handle crosses threads, an `HWND`
-    // does not.
-    /// Closes the dialog when the script ends, also when an assertion in it
-    /// failed: the thread that shows the dialog waits for it, and would
-    /// never report the failure.
-    struct CloseOnDrop(HWND);
-
-    impl Drop for CloseOnDrop {
-        fn drop(&mut self) {
-            // The dialog is gone already when the script closed it.
-            unsafe {
-                let _ = PostMessageW(Some(self.0), WM_CLOSE, WPARAM(0), LPARAM(0));
-            }
-        }
-    }
-
-    fn drive(script: impl FnOnce(HWND) + Send + 'static) -> thread::JoinHandle<()> {
-        thread::spawn(move || {
-            let dialog = find_dialog();
-            let _close = CloseOnDrop(dialog);
-            script(dialog)
-        })
-    }
-
-    #[test]
-    fn a_dialog_formats_the_code_and_takes_only_a_whole_one() {
-        let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
-        let driver = drive(|dialog| {
-            // The address was filled in, so the code is what is missing.
-            assert_eq!(text_of(dialog, ID_ADDRESS), "center:7878");
-            assert_eq!(text_of(dialog, ID_ADDRESS_NOTE), "");
-            assert!(!enabled(dialog, ID_OK));
-            assert_eq!(limit_of(dialog, ID_ADDRESS), ADDRESS_LIMIT);
-            assert_eq!(limit_of(dialog, ID_CODE), CODE_LIMIT);
-            // Typed and pasted codes are made into the form of a code.
-            set_text(dialog, ID_CODE, "abc");
-            assert_eq!(text_of(dialog, ID_CODE), "ABC");
-            assert!(!enabled(dialog, ID_OK));
-            set_text(dialog, ID_CODE, "abcd");
-            assert_eq!(text_of(dialog, ID_CODE), "ABC-D");
-            // The caret is after the text that was written back.
-            assert_eq!(caret_of(dialog, ID_CODE), 5);
-            set_text(dialog, ID_CODE, "a0b1c2");
-            assert_eq!(text_of(dialog, ID_CODE), "ABC-2");
-            set_text(dialog, ID_CODE, " abc-def\r\n");
-            assert_eq!(text_of(dialog, ID_CODE), "ABC-DEF");
-            // A real paste, with a line break in front of the code and one
-            // inside it, which a single-line box would cut short.
-            for pasted in ["\r\nABC-DEF\r\n", "ABC\r\nDEF", "\r\n\r\nabcdef"] {
-                set_text(dialog, ID_CODE, "");
-                paste(dialog, ID_CODE, pasted);
-                assert_eq!(text_of(dialog, ID_CODE), "ABC-DEF", "{pasted:?}");
-            }
-            assert!(enabled(dialog, ID_OK));
-            // Typed key by key.
-            set_text(dialog, ID_CODE, "");
-            for key in "abcd".chars() {
-                type_key(dialog, ID_CODE, key);
-            }
-            assert_eq!(text_of(dialog, ID_CODE), "ABC-D");
-            assert_eq!(caret_of(dialog, ID_CODE), 5);
-            // A paste replaces the selection, and the whole text is formatted
-            // again, with the caret after it.
-            set_text(dialog, ID_CODE, "abcdef");
-            select(dialog, ID_CODE, 0, 1);
-            paste(dialog, ID_CODE, "x");
-            assert_eq!(text_of(dialog, ID_CODE), "XBC-DEF");
-            assert_eq!(caret_of(dialog, ID_CODE), 7);
-            // The box takes no more than its limit, whatever the paste is:
-            // a code after that many spaces is not taken.
-            set_text(dialog, ID_CODE, "");
-            paste(
-                dialog,
-                ID_CODE,
-                &format!("{}ABC-DEF", " ".repeat(CODE_LIMIT)),
-            );
-            assert_eq!(text_of(dialog, ID_CODE), "");
-            assert!(!enabled(dialog, ID_OK));
-            set_text(dialog, ID_CODE, "abcdef");
-            assert!(enabled(dialog, ID_OK));
-            // An address that is not taken says why, and holds OK back.
-            set_text(dialog, ID_ADDRESS, "8.8.8.8:80");
-            assert!(text_of(dialog, ID_ADDRESS_NOTE).contains("not a loopback"));
-            assert!(!enabled(dialog, ID_OK));
-            set_text(dialog, ID_ADDRESS, "");
-            assert_eq!(text_of(dialog, ID_ADDRESS_NOTE), "");
-            assert!(!enabled(dialog, ID_OK));
-            set_text(dialog, ID_ADDRESS, "Center:7878");
-            assert!(enabled(dialog, ID_OK));
-            click(dialog, ID_OK);
-        });
-        let shown = run(HWND::default(), Some("center:7878"));
-        // The failure of the script is the one to report.
-        driver.join().unwrap();
-        let entry = shown.unwrap().unwrap();
-        assert_eq!(entry.address, "Center:7878");
-        assert_eq!(entry.code, "ABC-DEF");
-    }
-
-    #[test]
-    fn a_second_wm_initdialog_from_anywhere_does_nothing() {
-        const WM_INITDIALOG: u32 = 0x0110;
-        let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
-        let driver = drive(|dialog| {
-            set_text(dialog, ID_CODE, "abc");
-            // Sent as another process could send it, with a parameter that
-            // points nowhere. The dialog must neither read it nor start over:
-            // starting over would take the box's own replacement procedure
-            // for the original one, and every message to the box would then
-            // call itself.
-            for lparam in [0isize, 1, 0xdead_beef] {
-                unsafe {
-                    SendMessageW(dialog, WM_INITDIALOG, Some(WPARAM(0)), Some(LPARAM(lparam)));
-                }
-            }
-            // The box still works: typed, pasted and set text are formatted.
-            assert_eq!(text_of(dialog, ID_CODE), "ABC");
-            type_key(dialog, ID_CODE, 'd');
-            assert_eq!(text_of(dialog, ID_CODE), "ABC-D");
-            paste(dialog, ID_CODE, "ef");
-            assert_eq!(text_of(dialog, ID_CODE), "ABC-DEF");
-            click(dialog, ID_CANCEL);
-        });
-        let shown = run(HWND::default(), None);
-        driver.join().unwrap();
-        assert!(shown.unwrap().is_none());
-    }
-
-    #[test]
-    fn ok_does_nothing_until_the_input_is_good_and_cancel_sends_nothing() {
-        let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
-        let driver = drive(|dialog| {
-            // Without a prefill the address is what is missing.
-            assert_eq!(text_of(dialog, ID_ADDRESS), "");
-            set_text(dialog, ID_CODE, "abcdef");
-            assert!(!enabled(dialog, ID_OK));
-            // Enter reaches OK even when the button is held back: nothing
-            // happens, and the dialog stays.
-            click(dialog, ID_OK);
-            thread::sleep(Duration::from_millis(300));
-            assert_eq!(text_of(dialog, ID_CODE), "ABC-DEF");
-            // Close is Cancel.
-            unsafe {
-                PostMessageW(Some(dialog), WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap();
-            }
-        });
-        let shown = run(HWND::default(), None);
-        driver.join().unwrap();
-        assert!(shown.unwrap().is_none());
-        // The dialog is closed, so another may open.
-        let driver = drive(|dialog| click(dialog, ID_CANCEL));
-        let shown = run(HWND::default(), None);
-        driver.join().unwrap();
-        assert!(shown.unwrap().is_none());
-    }
-}
+#[path = "pair_dialog_tests.rs"]
+mod tests;

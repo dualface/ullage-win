@@ -9,6 +9,7 @@ mod gfx;
 mod instance;
 mod pair;
 mod pair_dialog;
+mod pair_paint;
 mod popup;
 mod registry;
 mod surface;

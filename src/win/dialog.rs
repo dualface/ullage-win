@@ -3,7 +3,7 @@
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    IDOK, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MessageBoxW,
+    MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW,
 };
 
 use super::util::{pcwstr, wide};
@@ -30,19 +30,5 @@ pub fn notice(owner: HWND, text: &str) {
             pcwstr(&caption),
             MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
         );
-    }
-}
-
-/// Whether the user chose OK.
-pub fn confirm(owner: HWND, text: &str) -> bool {
-    let text = wide(text);
-    let caption = wide(CAPTION);
-    unsafe {
-        MessageBoxW(
-            Some(owner),
-            pcwstr(&text),
-            pcwstr(&caption),
-            MB_OKCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND,
-        ) == IDOK
     }
 }

@@ -1,21 +1,17 @@
-//! The pairing dialog as data: the template of its window, and the words it
-//! shows. The window itself is in `win::pair_dialog`; nothing here knows
-//! about Windows, so what can be tested is tested anywhere.
+//! The pairing dialog as data: the template of its window, the ids of its
+//! controls and the rule that lets only one be open. What it looks like is in
+//! `scene::pair`. The window itself is in `win::pair_dialog`; nothing here
+//! knows about Windows, so what can be tested is tested anywhere.
 
-use crate::remote::address::RemoteAddress;
-
-pub const TITLE: &str = "Pair with a remote daemon";
-pub const HINT: &str =
-    "Run \"ullage device pair\" on the daemon's host. The code looks like ABC-DEF.";
+pub use crate::scene::pair::TITLE;
+use crate::scene::pair::{ADDRESS_LABEL, CANCEL, CODE_LABEL, PRIMARY};
 
 pub const ID_OK: u16 = 1;
 pub const ID_CANCEL: u16 = 2;
 pub const ID_ADDRESS_LABEL: u16 = 1001;
 pub const ID_ADDRESS: u16 = 1002;
-pub const ID_ADDRESS_NOTE: u16 = 1003;
 pub const ID_CODE_LABEL: u16 = 1004;
 pub const ID_CODE: u16 = 1005;
-pub const ID_CODE_HINT: u16 = 1006;
 
 /// The longest address the box takes. A host name is at most 253 characters.
 pub const ADDRESS_LIMIT: usize = 260;
@@ -29,10 +25,10 @@ const WS_POPUP: u32 = 0x8000_0000;
 const WS_CHILD: u32 = 0x4000_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_CAPTION: u32 = 0x00C0_0000;
+const WS_CLIPCHILDREN: u32 = 0x0200_0000;
 const WS_SYSMENU: u32 = 0x0008_0000;
 const WS_GROUP: u32 = 0x0002_0000;
 const WS_TABSTOP: u32 = 0x0001_0000;
-const WS_EX_CLIENTEDGE: u32 = 0x0000_0200;
 // Dialog styles.
 const DS_SETFONT: u32 = 0x40;
 const DS_MODALFRAME: u32 = 0x80;
@@ -66,25 +62,28 @@ struct Control {
     text: &'static str,
 }
 
-/// In tab order: the two boxes, then the buttons. The default button is
-/// `OK`, so that Enter takes the input.
-fn controls() -> [Control; 8] {
+/// In tab order: the two boxes, then the buttons. The default button is the
+/// main one, so that Enter takes the input. The rectangles are placeholders:
+/// the dialog puts every control in place when it opens, by `scene::pair`.
+fn controls() -> [Control; 6] {
     let visible = WS_CHILD | WS_VISIBLE;
     let label = visible | SS_LEFT | SS_NOPREFIX;
     let edit = visible | WS_TABSTOP | ES_AUTOHSCROLL;
     [
+        // The labels stay controls, so that each box has a name for a screen
+        // reader: the name of a box is the text of the control before it.
         Control {
             class: CLASS_STATIC,
             style: label,
             ex_style: 0,
-            rect: (10, 10, 240, 8),
+            rect: (10, 10, 100, 8),
             id: ID_ADDRESS_LABEL,
-            text: "Address",
+            text: ADDRESS_LABEL,
         },
         Control {
             class: CLASS_EDIT,
             style: edit | WS_GROUP,
-            ex_style: WS_EX_CLIENTEDGE,
+            ex_style: 0,
             rect: (10, 20, 240, 14),
             id: ID_ADDRESS,
             text: "",
@@ -93,17 +92,9 @@ fn controls() -> [Control; 8] {
             class: CLASS_STATIC,
             style: label,
             ex_style: 0,
-            rect: (10, 36, 240, 16),
-            id: ID_ADDRESS_NOTE,
-            text: "",
-        },
-        Control {
-            class: CLASS_STATIC,
-            style: label,
-            ex_style: 0,
-            rect: (10, 56, 240, 8),
+            rect: (10, 40, 100, 8),
             id: ID_CODE_LABEL,
-            text: "Pair code",
+            text: CODE_LABEL,
         },
         Control {
             class: CLASS_EDIT,
@@ -116,34 +107,26 @@ fn controls() -> [Control; 8] {
             // `ES_AUTOVSCROLL`: a multi-line box without it refuses text that
             // needs more lines than the box shows, so the paste would be lost.
             style: edit | ES_MULTILINE | ES_AUTOVSCROLL,
-            ex_style: WS_EX_CLIENTEDGE,
-            rect: (10, 66, 80, 14),
+            ex_style: 0,
+            rect: (10, 50, 80, 14),
             id: ID_CODE,
             text: "",
-        },
-        Control {
-            class: CLASS_STATIC,
-            style: label,
-            ex_style: 0,
-            rect: (10, 84, 240, 16),
-            id: ID_CODE_HINT,
-            text: HINT,
         },
         Control {
             class: CLASS_BUTTON,
             style: visible | WS_TABSTOP | BS_DEFPUSHBUTTON,
             ex_style: 0,
-            rect: (146, 104, 50, 14),
+            rect: (146, 80, 50, 14),
             id: ID_OK,
-            text: "OK",
+            text: PRIMARY,
         },
         Control {
             class: CLASS_BUTTON,
             style: visible | WS_TABSTOP | BS_PUSHBUTTON,
             ex_style: 0,
-            rect: (200, 104, 50, 14),
+            rect: (200, 80, 50, 14),
             id: ID_CANCEL,
-            text: "Cancel",
+            text: CANCEL,
         },
     ]
 }
@@ -182,7 +165,7 @@ pub fn template() -> Vec<u8> {
     let mut bytes = Vec::new();
     put_u32(
         &mut bytes,
-        WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SETFONT,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | DS_MODALFRAME | DS_SETFONT,
     );
     put_u32(&mut bytes, 0);
     put_u16(&mut bytes, controls.len() as u16);
@@ -233,40 +216,6 @@ impl OnePlace {
     pub fn give_back(&mut self) {
         self.taken = false;
     }
-}
-
-/// What the line under the address box says: nothing for an empty box or an
-/// address that is taken, and why not for any other.
-pub fn address_note(text: &str) -> String {
-    if text.is_empty() {
-        return String::new();
-    }
-    match RemoteAddress::parse(text) {
-        Ok(_) => String::new(),
-        Err(error) => {
-            let mut note = error.to_string();
-            if let Some(first) = note.get_mut(..1) {
-                first.make_ascii_uppercase();
-            }
-            note.push('.');
-            note
-        }
-    }
-}
-
-/// The question that is asked before a pairing code is sent over a path that
-/// is not encrypted. An encrypted path has none: the user has typed the
-/// address, and says so by pressing OK.
-pub fn plaintext_question(address: &RemoteAddress) -> Option<String> {
-    if address.is_encrypted_path() {
-        return None;
-    }
-    Some(format!(
-        "Pair this device with the ullage daemon at {address}?\n\n\
-         This address is not known to be on Tailscale (a host name is judged by \
-         its spelling): the pairing code and the device token may cross the \
-         network as plain text. (plaintext)"
-    ))
 }
 
 #[cfg(test)]
@@ -323,6 +272,7 @@ mod tests {
         assert_eq!(style & DS_MODALFRAME, DS_MODALFRAME);
         assert_eq!(style & WS_POPUP, WS_POPUP);
         assert_eq!(style & WS_SYSMENU, WS_SYSMENU);
+        assert_eq!(style & WS_CLIPCHILDREN, WS_CLIPCHILDREN);
         assert_eq!(read.u32(), 0, "extended style");
         let count = read.u16();
         assert_eq!(usize::from(count), controls().len());
@@ -353,39 +303,39 @@ mod tests {
             [
                 ID_ADDRESS_LABEL,
                 ID_ADDRESS,
-                ID_ADDRESS_NOTE,
                 ID_CODE_LABEL,
                 ID_CODE,
-                ID_CODE_HINT,
                 ID_OK,
                 ID_CANCEL
             ]
         );
         let text_of = |wanted: u16| &seen.iter().find(|item| item.0 == wanted).unwrap().3;
-        assert_eq!(text_of(ID_ADDRESS_LABEL), "Address");
-        assert_eq!(text_of(ID_CODE_LABEL), "Pair code");
-        assert_eq!(text_of(ID_CODE_HINT), HINT);
-        assert_eq!(text_of(ID_OK), "OK");
+        assert_eq!(text_of(ID_ADDRESS_LABEL), "ADDRESS");
+        assert_eq!(text_of(ID_CODE_LABEL), "PAIR CODE");
+        assert_eq!(text_of(ID_OK), "Pair");
         assert_eq!(text_of(ID_CANCEL), "Cancel");
     }
 
     #[test]
-    fn the_boxes_and_the_buttons_are_tab_stops_and_ok_is_the_default() {
+    fn the_boxes_and_the_buttons_are_tab_stops_and_the_main_button_is_the_default() {
         let controls = controls();
         let find = |id: u16| controls.iter().find(|control| control.id == id).unwrap();
         for id in [ID_ADDRESS, ID_CODE, ID_OK, ID_CANCEL] {
             assert_eq!(find(id).style & WS_TABSTOP, WS_TABSTOP, "{id}");
         }
-        for id in [
-            ID_ADDRESS_LABEL,
-            ID_ADDRESS_NOTE,
-            ID_CODE_LABEL,
-            ID_CODE_HINT,
-        ] {
+        for id in [ID_ADDRESS_LABEL, ID_CODE_LABEL] {
             assert_eq!(find(id).style & WS_TABSTOP, 0, "{id}");
         }
         assert_eq!(find(ID_OK).style & 0xF, BS_DEFPUSHBUTTON);
         assert_eq!(find(ID_CANCEL).style & 0xF, BS_PUSHBUTTON);
+        // Neither is owner-drawn: the system keeps the default button, Enter
+        // and Space, and no `WM_DRAWITEM` with a pointer comes in.
+        const BS_OWNERDRAW: u32 = 0xB;
+        assert_ne!(find(ID_OK).style & 0xF, BS_OWNERDRAW);
+        assert_ne!(find(ID_CANCEL).style & 0xF, BS_OWNERDRAW);
+        // The boxes have no edge of their own: the dialog draws their frame.
+        assert_eq!(find(ID_ADDRESS).ex_style, 0);
+        assert_eq!(find(ID_CODE).ex_style, 0);
         // The boxes have a scroll for what does not fit.
         assert_eq!(find(ID_ADDRESS).style & ES_AUTOHSCROLL, ES_AUTOHSCROLL);
         assert_eq!(find(ID_CODE).style & ES_AUTOHSCROLL, ES_AUTOHSCROLL);
@@ -397,24 +347,6 @@ mod tests {
         assert_eq!(find(ID_CODE).style & ES_AUTOVSCROLL, ES_AUTOVSCROLL);
         for id in [ID_ADDRESS, ID_CODE] {
             assert_eq!(find(id).style & ES_WANTRETURN, 0, "{id}");
-        }
-    }
-
-    #[test]
-    fn every_control_is_inside_the_dialog_and_no_two_boxes_overlap() {
-        let controls = controls();
-        for control in &controls {
-            let (x, y, width, height) = control.rect;
-            assert!(x >= 0 && y >= 0, "{}", control.id);
-            assert!(x + width <= WIDTH && y + height <= HEIGHT, "{}", control.id);
-        }
-        for (index, a) in controls.iter().enumerate() {
-            for b in &controls[index + 1..] {
-                let (ax, ay, aw, ah) = a.rect;
-                let (bx, by, bw, bh) = b.rect;
-                let apart = ax + aw <= bx || bx + bw <= ax || ay + ah <= by || by + bh <= ay;
-                assert!(apart, "{} and {}", a.id, b.id);
-            }
         }
     }
 
@@ -436,43 +368,5 @@ mod tests {
         place.give_back();
         assert!(place.take());
         assert!(!place.take());
-    }
-
-    #[test]
-    fn the_note_under_the_address_says_why_it_is_not_taken() {
-        assert_eq!(address_note(""), "");
-        assert_eq!(address_note("center:7878"), "");
-        assert_eq!(address_note("100.71.140.68:7878"), "");
-        assert_eq!(
-            address_note("center"),
-            "The address is not of the form <host>:<port>."
-        );
-        assert_eq!(
-            address_note("under_score:1"),
-            "The host is not a host name or an IPv4 address."
-        );
-        assert_eq!(
-            address_note("center:0"),
-            "The port is not a number from 1 to 65535."
-        );
-        assert_eq!(
-            address_note("8.8.8.8:80"),
-            "The address is not a loopback, Tailscale or private network address."
-        );
-    }
-
-    #[test]
-    fn only_a_path_that_is_not_encrypted_is_asked_about() {
-        let ask = |text: &str| plaintext_question(&RemoteAddress::parse(text).unwrap());
-        assert_eq!(ask("100.71.140.68:7878"), None);
-        assert_eq!(ask("127.0.0.1:7878"), None);
-        assert_eq!(ask("localhost:7878"), None);
-        assert_eq!(ask("center.tailnet.ts.net:7878"), None);
-        for text in ["192.168.50.11:7878", "10.0.0.1:7878", "center:7878"] {
-            let question = ask(text).unwrap();
-            assert!(question.contains(text), "{text}");
-            assert!(question.contains("(plaintext)"), "{text}");
-            assert!(question.contains("pairing code"), "{text}");
-        }
     }
 }

@@ -75,6 +75,11 @@ impl Typography {
         }
     }
 
+    /// The name of the family that `kind` is drawn in, with its closing NUL.
+    pub fn family_name(&self, kind: FontKind) -> &[u16] {
+        self.family(kind)
+    }
+
     fn family(&self, kind: FontKind) -> &[u16] {
         match kind {
             FontKind::Ui => &self.ui,
