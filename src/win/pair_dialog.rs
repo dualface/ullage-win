@@ -58,6 +58,11 @@ struct Shared {
     /// Set while the code box is rewritten, so that its own change is not
     /// formatted again.
     formatting: Cell<bool>,
+    /// Set while the code box handles a message that changes its text. The
+    /// box can send `EN_CHANGE` in the middle of it (a paste over a selection
+    /// first deletes the selection, and tells), and formatting then would
+    /// work on a text that is not yet the whole result.
+    editing: Cell<bool>,
     entry: RefCell<Option<Entry>>,
 }
 
@@ -77,6 +82,7 @@ pub fn run(owner: HWND, prefill: Option<&str>) -> Result<Option<Entry>, Failed> 
         prefill: prefill.unwrap_or_default().to_owned(),
         owner,
         formatting: Cell::new(false),
+        editing: Cell::new(false),
         entry: RefCell::new(None),
     };
     let ended = unsafe {
@@ -129,6 +135,7 @@ unsafe extern "system" fn dialog_proc(
             let notification = hiword(wparam.0 as isize) as u32;
             match (id, notification) {
                 (ID_ADDRESS, EN_CHANGE) => refresh(hwnd),
+                (ID_CODE, EN_CHANGE) if shared.editing.get() => refresh(hwnd),
                 (ID_CODE, EN_CHANGE) => code_changed(hwnd, shared),
                 // `BN_CLICKED`, which is also what Enter and Esc send.
                 (ID_OK, 0) => accept(hwnd, shared),
@@ -163,12 +170,18 @@ unsafe extern "system" fn code_box_proc(
     // was set up, which is a function with this signature.
     let original: windows::Win32::UI::WindowsAndMessaging::WNDPROC =
         unsafe { std::mem::transmute(original) };
+    let changes = CHANGES_TEXT.contains(&message);
+    let shared = unsafe { GetParent(hwnd) }
+        .ok()
+        .and_then(|dialog| shared_of(dialog).map(|shared| (dialog, shared)));
+    let outer = shared.map(|(_, shared)| shared.editing.replace(changes || shared.editing.get()));
     let result = unsafe { CallWindowProcW(original, hwnd, message, wparam, lparam) };
-    if CHANGES_TEXT.contains(&message)
-        && let Ok(dialog) = unsafe { GetParent(hwnd) }
-        && let Some(shared) = shared_of(dialog)
-    {
-        code_changed(dialog, shared);
+    if let (Some((dialog, shared)), Some(outer)) = (shared, outer) {
+        shared.editing.set(outer);
+        // Only the outermost message formats: the text is whole by then.
+        if changes && !outer {
+            code_changed(dialog, shared);
+        }
     }
     result
 }
