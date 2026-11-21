@@ -9,6 +9,7 @@
 //! coordinates, with the origin at the top left of the content area.
 
 mod cards;
+pub mod pair;
 mod strip;
 mod title;
 mod unavailable;
