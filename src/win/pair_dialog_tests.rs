@@ -284,6 +284,23 @@ fn enter_in_a_box_pairs() {
 }
 
 #[test]
+fn escape_cancels_and_does_not_pair() {
+    const VK_ESCAPE: usize = 0x1B;
+    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let driver = drive(|dialog| {
+        set_text(dialog, ID_CODE, "abcdef");
+        assert!(enabled(dialog, ID_OK));
+        focus(dialog, ID_CODE);
+        unsafe {
+            PostMessageW(Some(dialog), WM_KEYDOWN, WPARAM(VK_ESCAPE), LPARAM(0)).unwrap();
+        }
+    });
+    let shown = run(HWND::default(), Some("100.71.140.68:7878"));
+    driver.join().unwrap();
+    assert!(shown.unwrap().is_none(), "Esc is Cancel");
+}
+
+#[test]
 fn enter_on_cancel_cancels_and_does_not_pair() {
     let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
     let driver = drive(|dialog| {
