@@ -83,6 +83,13 @@ cargo build --release
 The program is `target\release\ullage-win.exe`. It is a GUI program: it opens
 no console window.
 
+The app icon is `packaging/windows/app-icon.ico`, embedded in the program
+by `build.rs` and used by the installer. It is made from
+`packaging/windows/app-icon.svg`: after changing the SVG, run
+`packaging/windows/make-icon.sh` (it needs `rsvg-convert` and `python3`) and
+commit both files. Building on Windows needs the resource compiler of the
+Visual Studio C++ build tools, which the build tools above include.
+
 The usage data comes from the `ullage-client` and `ullage-protocol` crates of
 the ullage repository, pinned to one commit in `Cargo.toml`.
 

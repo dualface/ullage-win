@@ -31,14 +31,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DLGTEMPLATE, DWLP_MSGRESULT, DefWindowProcW, DialogBoxIndirectParamW,
     EN_CHANGE, EndDialog, GWL_EXSTYLE, GWL_STYLE, GWLP_WNDPROC, GetClientRect, GetDlgCtrlID,
     GetDlgItem, GetDlgItemTextW, GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendDlgItemMessageW, SendMessageW,
-    SetDlgItemTextW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, WINDOW_LONG_PTR_INDEX,
-    WM_CLOSE, WM_COMMAND, WM_INITDIALOG,
+    ICON_BIG, ICON_SMALL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SendDlgItemMessageW, SendMessageW, SetDlgItemTextW, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPos, WINDOW_LONG_PTR_INDEX, WM_CLOSE, WM_COMMAND, WM_INITDIALOG, WM_SETICON,
 };
 
 use super::pair_paint::{Ui, colorref, is_dc};
 use super::registry;
-use super::util::{hiword, loword, pcwstr, wide};
+use super::util::{app_icon, hiword, loword, pcwstr, wide};
 use crate::pair_form::{
     ADDRESS_LIMIT, CODE_LIMIT, ID_ADDRESS, ID_ADDRESS_LABEL, ID_CANCEL, ID_CODE, ID_CODE_LABEL,
     ID_OK, template,
@@ -725,6 +725,18 @@ fn initialize(hwnd: HWND, shared: &Rc<Shared>) -> Result<(), Failed> {
     let ui = Rc::new(Ui::new(mode, first).map_err(|_| Failed)?);
     *shared.ui.borrow_mut() = Some(ui.clone());
     unsafe {
+        // Alt+Tab lists the dialog with the large icon. A modal frame shows
+        // no icon in the title bar.
+        for (kind, small) in [(ICON_BIG, false), (ICON_SMALL, true)] {
+            if let Some(icon) = app_icon(small) {
+                SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    Some(WPARAM(kind as usize)),
+                    Some(LPARAM(icon.0 as isize)),
+                );
+            }
+        }
         SendDlgItemMessageW(
             hwnd,
             ID_ADDRESS.into(),

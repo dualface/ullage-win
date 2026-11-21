@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- The app icon: the container mark of the title bar and the tray icon
+       (src/icons.rs, a 16-unit view box) on a tile in the Mark colour of the
+       light theme. Fixed colours, so it reads on light and dark backgrounds.
+       Regenerate app-icon.ico with make-icon.sh after changing this file. -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#8A2433"/>
+  <g transform="translate(32 26) scale(12)">
+    <path d="M4.4 8.2c1.2-.7 2.4.7 3.6 0s2.4-.7 3.6 0V9a3.6 3.6 0 0 1-7.2 0z" fill="#F4C2C8"/>
+    <path d="M3 2.5v6.5a5 5 0 0 0 10 0V2.5" fill="none" stroke="#FFFFFF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

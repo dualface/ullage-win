@@ -1,8 +1,41 @@
 //! Small helpers shared by the Windows modules.
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetSystemMetrics, HICON, IMAGE_ICON, LR_SHARED, LoadImageW, PostMessageW, SM_CXICON,
+    SM_CXSMICON, SM_CYICON, SM_CYSMICON,
+};
 use windows::core::PCWSTR;
+
+/// The id of the app icon in the resources of the program, as
+/// `packaging/windows/app-icon.rc` numbers it.
+const APP_ICON_ID: usize = 1;
+
+/// The app icon at the size of a small icon (title bars) or a large one
+/// (Alt+Tab). It is loaded shared, so it is never destroyed. `None` when the
+/// program was built without it.
+pub fn app_icon(small: bool) -> Option<HICON> {
+    let (cx, cy) = if small {
+        (SM_CXSMICON, SM_CYSMICON)
+    } else {
+        (SM_CXICON, SM_CYICON)
+    };
+    unsafe {
+        let module = GetModuleHandleW(None).ok()?;
+        let icon = LoadImageW(
+            Some(module.into()),
+            // MAKEINTRESOURCE: a resource id in place of a name.
+            PCWSTR(APP_ICON_ID as *const u16),
+            IMAGE_ICON,
+            GetSystemMetrics(cx),
+            GetSystemMetrics(cy),
+            LR_SHARED,
+        )
+        .ok()?;
+        Some(HICON(icon.0))
+    }
+}
 
 /// Posts `message` to the window whose handle value is `target`. A raw
 /// handle value can cross threads; an `HWND` cannot.

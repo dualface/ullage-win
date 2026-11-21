@@ -17,6 +17,9 @@
 #ifndef OutputDir
   #define OutputDir "."
 #endif
+#ifndef SetupIcon
+  #define SetupIcon "app-icon.ico"
+#endif
 
 #define AppExeName "ullage-win.exe"
 ; Fixed by the app (src/contract.rs): the window class, the quit message and
@@ -46,6 +49,8 @@ PrivilegesRequiredOverridesAllowed=commandline
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#AppExeName}
+; The icon of the setup program; the installed program carries the same one.
+SetupIconFile={#SetupIcon}
 MinVersion=10.0
 ; Fallback when the quit message below does not end the app in time.
 CloseApplications=yes

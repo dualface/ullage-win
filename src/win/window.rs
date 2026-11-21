@@ -41,7 +41,7 @@ use super::pair_dialog;
 use super::popup;
 use super::text::Typography;
 use super::tray::{self, WM_TRAY};
-use super::util::{hiword, loword, pcwstr, wide, x_of, y_of};
+use super::util::{app_icon, hiword, loword, pcwstr, wide, x_of, y_of};
 use crate::contract::{QUIT_MESSAGE, SHOW_MESSAGE, WINDOW_CLASS};
 use crate::placement::Edges;
 use crate::prefs::{Prefs, load, prefs_path};
@@ -407,6 +407,8 @@ fn register_class() -> bool {
             lpfnWndProc: Some(window_proc),
             hInstance: module.into(),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hIcon: app_icon(false).unwrap_or_default(),
+            hIconSm: app_icon(true).unwrap_or_default(),
             lpszClassName: PCWSTR(class_name.as_ptr()),
             ..Default::default()
         };
