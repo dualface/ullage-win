@@ -478,3 +478,36 @@ fn the_dialog_can_be_pictured_in_each_state() {
     picture("plaintext", Mode::Light, "center:7878", "abcdef");
     picture("incomplete", Mode::Light, "", "");
 }
+
+#[test]
+fn the_dialog_draws_its_background_and_its_shapes_on_a_surface() {
+    use crate::win::surface::Surface;
+    for mode in [Mode::Light, Mode::Dark] {
+        let ui = Ui::new(mode, 96).expect("the fonts and the factory");
+        let mut surface = Surface::new(420, 300).unwrap();
+        ui.draw_dialog(surface.hdc, (420, 300), "center:7878")
+            .expect("drawing on a surface works");
+        let background = colorref(mode, Role::Win);
+        let pixels = surface.pixels_mut();
+        let corner = &pixels[..4];
+        // B, G, R of the dialog's colour at the top left, where nothing else
+        // is drawn.
+        assert_eq!(
+            (corner[2], corner[1], corner[0]),
+            (
+                (background.0 & 0xFF) as u8,
+                ((background.0 >> 8) & 0xFF) as u8,
+                ((background.0 >> 16) & 0xFF) as u8
+            ),
+            "{mode:?}"
+        );
+        // And something else is drawn too: the title, the frames, the note.
+        let different = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|pixel| pixel[..3] != corner[..3])
+            .count();
+        assert!(different > 2000, "{mode:?}: {different} pixels differ");
+    }
+}
