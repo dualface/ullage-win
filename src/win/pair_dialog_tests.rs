@@ -458,6 +458,7 @@ fn picture(name: &'static str, mode: Mode, address: &'static str, code: &'static
         if !code.is_empty() {
             set_text(dialog, ID_CODE, code);
         }
+        focus(dialog, ID_OK);
         // The dialog draws on the thread that shows it; give it a moment.
         thread::sleep(Duration::from_millis(300));
         shoot(dialog, name);
