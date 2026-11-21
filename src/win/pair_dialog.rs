@@ -88,7 +88,8 @@ const WM_UNDO: u32 = 0x0304;
 const WM_DPICHANGED: u32 = 0x02E0;
 const BM_SETSTATE: u32 = 0x00F3;
 const UISF_HIDEFOCUS: isize = 0x1;
-/// A message of the tests: draw on the window's own device context.
+/// A message of the tests: draw as `WM_PAINT` does, on the device context in
+/// `wparam`.
 #[cfg(test)]
 const TEST_PAINT_WINDOW: u32 = 0x8000 + 0x77;
 /// `DWMWA_USE_IMMERSIVE_DARK_MODE`.
@@ -290,17 +291,12 @@ unsafe extern "system" fn dialog_proc(
             // The focus is set there, so the dialog manager must not.
             0
         }
-        // For the tests, which run where the window is never shown and so is
-        // never sent `WM_PAINT`: draw on the window's own device context, as
-        // `WM_PAINT` does.
+        // For the tests, which run where the window is never shown, is never
+        // sent `WM_PAINT`, and cannot be copied to: draw on the device context
+        // that `wparam` is, as `WM_PAINT` draws on the window's.
         #[cfg(test)]
         TEST_PAINT_WINDOW if shared_of(hwnd).is_some() => {
-            unsafe {
-                use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
-                let hdc = GetDC(Some(hwnd));
-                draw_dialog_on(hwnd, hdc, true);
-                ReleaseDC(Some(hwnd), hdc);
-            }
+            draw_dialog_on(hwnd, HDC(wparam.0 as *mut _), true);
             1
         }
         // The rest have no state to act on before `WM_INITDIALOG`, and are

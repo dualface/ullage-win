@@ -261,12 +261,24 @@ fn focus(dialog: HWND, id: u16) {
     }
 }
 
-/// Has the dialog draw itself on the window, as `WM_PAINT` does. A session
-/// without a screen never sends `WM_PAINT` to a window that is not shown, so
-/// the dialog has a message for this in the tests.
+/// Has the dialog draw itself as `WM_PAINT` makes it draw on the window. A
+/// session without a screen never sends `WM_PAINT` to a window that is not
+/// shown, so the dialog has a message for this in the tests.
 fn paint_on_window(dialog: HWND) {
+    let mut rect = RECT::default();
     unsafe {
-        SendMessageW(dialog, TEST_PAINT_WINDOW, None, None);
+        let _ = GetClientRect(dialog, &mut rect);
+    }
+    // The device context stands for the window's: copying to a window that is
+    // not shown does not work, and the drawing is what the dialog notes.
+    let surface = crate::win::surface::Surface::new(rect.right.max(1), rect.bottom.max(1)).unwrap();
+    unsafe {
+        SendMessageW(
+            dialog,
+            TEST_PAINT_WINDOW,
+            Some(WPARAM(surface.hdc.0 as usize)),
+            None,
+        );
     }
 }
 
