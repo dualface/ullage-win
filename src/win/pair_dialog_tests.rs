@@ -299,13 +299,17 @@ fn messages_with_parameters_that_point_nowhere_do_nothing() {
         let address = unsafe { GetDlgItem(Some(dialog), ID_ADDRESS.into()) }.unwrap();
         for value in [0usize, 1, 0xdead_beef] {
             for message in [WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_PRINTCLIENT] {
-                unsafe {
+                let answer = unsafe {
                     SendMessageW(
                         dialog,
                         message,
                         Some(WPARAM(value)),
                         Some(LPARAM(value as isize)),
-                    );
+                    )
+                };
+                // A control that is not one of the dialog's gets no brush.
+                if message != WM_PRINTCLIENT {
+                    assert_eq!(answer.0, 0, "{message:#x} {value:#x}");
                 }
             }
         }
@@ -318,6 +322,28 @@ fn messages_with_parameters_that_point_nowhere_do_nothing() {
                 Some(LPARAM(address.0 as isize)),
             );
         }
+        // And with one, it gets the brush of the frame.
+        let surface = crate::win::surface::Surface::new(8, 8).unwrap();
+        let brush = unsafe {
+            SendMessageW(
+                dialog,
+                WM_CTLCOLOREDIT,
+                Some(WPARAM(surface.hdc.0 as usize)),
+                Some(LPARAM(address.0 as isize)),
+            )
+        };
+        assert_ne!(brush.0, 0);
+        // A label is not a box, and a box is not a label.
+        let label = unsafe { GetDlgItem(Some(dialog), ID_ADDRESS_LABEL.into()) }.unwrap();
+        let wrong = unsafe {
+            SendMessageW(
+                dialog,
+                WM_CTLCOLOREDIT,
+                Some(WPARAM(surface.hdc.0 as usize)),
+                Some(LPARAM(label.0 as isize)),
+            )
+        };
+        assert_eq!(wrong.0, 0);
         // The dialog still works.
         assert_eq!(text_of(dialog, ID_CODE), "ABC");
         type_key(dialog, ID_CODE, 'd');
@@ -544,5 +570,48 @@ fn the_dialog_draws_its_background_and_its_shapes_on_a_surface() {
             .filter(|pixel| pixel[..3] != corner[..3])
             .count();
         assert!(different > 2000, "{mode:?}: {different} pixels differ");
+    }
+}
+
+#[test]
+fn the_window_prints_itself_in_the_colours_of_the_mode() {
+    const WM_PRINT: u32 = 0x0317;
+    // PRF_NONCLIENT | PRF_CLIENT | PRF_ERASEBKGND | PRF_CHILDREN
+    const PRINT_ALL: usize = 0x2 | 0x4 | 0x8 | 0x10;
+    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    for mode in [Mode::Light, Mode::Dark] {
+        let driver = drive(move |dialog| {
+            set_text(dialog, ID_CODE, "abcdef");
+            let mut rect = RECT::default();
+            unsafe {
+                let _ = GetClientRect(dialog, &mut rect);
+            }
+            let mut surface = crate::win::surface::Surface::new(rect.right, rect.bottom).unwrap();
+            unsafe {
+                SendMessageW(
+                    dialog,
+                    WM_PRINT,
+                    Some(WPARAM(surface.hdc.0 as usize)),
+                    Some(LPARAM((PRINT_ALL & !0x2) as isize)),
+                );
+            }
+            let background = colorref(mode, Role::Win);
+            let want = [
+                (background.0 >> 16) as u8,
+                (background.0 >> 8) as u8,
+                background.0 as u8,
+            ];
+            let pixels = surface.pixels_mut();
+            // The corner of the client area is the colour of the dialog, and
+            // there is more drawn than that.
+            assert_eq!(pixels[..3], want, "{mode:?}");
+            let distinct: std::collections::HashSet<[u8; 4]> =
+                pixels.as_chunks::<4>().0.iter().copied().collect();
+            assert!(distinct.len() > 20, "{mode:?}: {} colours", distinct.len());
+            click(dialog, ID_CANCEL);
+        });
+        let shown = run_with_mode(HWND::default(), None, mode);
+        driver.join().unwrap();
+        assert!(shown.unwrap().is_none());
     }
 }
